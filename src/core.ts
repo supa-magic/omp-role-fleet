@@ -18,6 +18,15 @@
 
 export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto";
 
+/**
+ * Tool grants. One definition each, here: the static cast, the specialist
+ * catalog and the proposal sandbox all draw from these, so a grant change is
+ * one edit rather than three that must agree. A grant list is a security
+ * boundary — the proposal sandbox in particular is only as tight as this array.
+ */
+export const READ_TOOLS = ["read", "grep", "glob"];
+export const WRITE_TOOLS = ["read", "grep", "glob", "edit", "write"];
+
 /** A model an allowlist can pin to: `selector` names it, `aliases` add lookup
  *  names, `enabled: false` takes it out of every chain. */
 export interface FleetModel {
@@ -70,11 +79,10 @@ export interface RolePlan {
  *  issues. There is no "amend" path — the caller fixes the task, not the plan. */
 export type Verdict = "approve" | "reject";
 
-export interface AdvisorVerdict {
+export interface GateVerdict {
   verdict: Verdict;
   reason: string;
   issues: string[];
-  source: "static";
 }
 
 /**
@@ -201,13 +209,18 @@ export function bindFleet(fleet: Fleet, roles: RoleSpec[], notes: string[]): Rol
   const midx = modelIndex(fleet);
   const ordinal = new Map<string, number>();
   return roles.map((r) => {
-    const seat = ridx.get(normalizeSeat(r.core));
+    const seatKey = normalizeSeat(r.core);
+    const seat = ridx.get(seatKey);
     if (!seat) {
       notes.push(`role ${r.id}: seat "${r.core}" not in allowlist — keeping ${r.model}`);
       return r;
     }
-    const n = ordinal.get(r.core) ?? 0;
-    ordinal.set(r.core, n + 1);
+    // The ordinal must be keyed by the *normalized* seat, exactly like the
+    // lookup above: "Reviewer" and "reviewer" resolve to one seat, so they must
+    // also share one counter — otherwise both take chain[0] and the multi-model
+    // spread this whole mechanism exists for collapses.
+    const n = ordinal.get(seatKey) ?? 0;
+    ordinal.set(seatKey, n + 1);
     const chain = (seat.chain ?? [])
       .map((token) => midx.get(normalizeSeat(token)))
       .filter((m): m is FleetModel => !!m && m.enabled !== false);

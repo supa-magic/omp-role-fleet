@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { aliasFor, bindFleet, planWaves, validatePlan, type Fleet, type RoleSpec } from "../src/core.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
-import { gatePlan } from "../src/advisor.ts";
-import { agentMarkdown, dispatchGroups, emitAgents } from "../src/agents.ts";
+import { gatePlan } from "../src/gate.ts";
+import { agentMarkdown, dispatchGroups, emitAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
-import { renderDispatch, renderPlan } from "../src/render.ts";
+import { renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
 
 function planFor(task: string, maxRoles?: number) {
   return synthesizePlan({ task, cwd: "/tmp", workDir: "/tmp/wf", maxRoles });
@@ -309,6 +309,341 @@ test("a hand-copied rename of a generated agent survives the next run", async ()
   assert.ok(files.includes("rf-scout-copy.md"), "a renamed copy is the user's file, not stale output");
   // The second plan is analysis-only, so its implementer file is genuinely stale.
   assert.ok(!files.includes("rf-implementer.md"), "the stale generated file itself must still go");
+});
+
+test("a seat spelled two ways still spreads a council across distinct models", () => {
+  // "reviewer" and "Reviewer" normalize to one seat, so they must share one
+  // ordinal counter too: independent counters give both chain[0] and collapse
+  // the multi-model spread the ordinal exists to guarantee.
+  const councilFleet: Fleet = {
+    models: [
+      { selector: "fast/model", aliases: ["fast"] },
+      { selector: "slow/model", aliases: ["slow"] },
+    ],
+    roles: [{ role: "reviewer", chain: ["fast", "slow"] }],
+  };
+  const base = planFor("fix the auth bug").roles[0];
+  const notes: string[] = [];
+  const bound = bindFleet(
+    councilFleet,
+    [
+      { ...base, id: "reviewer-c1", core: "reviewer" },
+      { ...base, id: "reviewer-c2", core: "Reviewer" },
+    ],
+    notes,
+  );
+  assert.equal(bound[0].model, "fast/model");
+  assert.equal(bound[1].model, "slow/model");
+});
+
+test("council members do not share one depends_on array", () => {
+  // One shared instance meant any in-place edit of one member's dependencies
+  // edited all of them — a hazard the moment anything mutates a plan.
+  const plan = synthesizePlan({
+    task: "review with different providers",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+    council: 3,
+  });
+  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  assert.equal(members.length, 3);
+  assert.equal(new Set(members.map((m) => m.depends_on)).size, 3, "each member needs its own array");
+
+  // And mutating one really does leave the others alone.
+  members[0]!.depends_on.push("scout");
+  assert.deepEqual(members[1]!.depends_on, ["scout"]);
+});
+
+test("roster ids stay unique and within budget even when truncation collides", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-roster-"));
+  const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir });
+  // Ids identical for far longer than the 32-character budget, so truncation
+  // alone collapses them to one string.
+  const twin = (id: string) => ({
+    agent: `rf-${id}`,
+    role: id,
+    path: "",
+    wave: 2,
+    model: "@task",
+    artifact: "",
+    dependsOn: [],
+  });
+  const groups: DispatchGroup[] = [
+    {
+      wave: 1,
+      parallel: true,
+      conflicted: false,
+      agents: [
+        twin("payment-domain-consistency-audit-of-the-ledger-alpha"),
+        twin("payment-domain-consistency-audit-of-the-ledger-beta"),
+      ],
+    },
+  ];
+
+  const text = renderDispatch(groups, dir);
+  const names = [...text.matchAll(/"name": "([^"]+)"/g)].map((m) => m[1]!);
+  assert.equal(names.length, 2);
+  assert.equal(new Set(names).size, 2, `roster ids must be unique: ${names.join(" | ")}`);
+  for (const n of names) assert.ok(n.length <= 32, `roster id over budget: ${n}`);
+});
+
+test("a council exempt from the cap still reports the real fan-out", () => {
+  const plan = synthesizePlan({
+    task: "fix the auth bug",
+    cwd: "/tmp",
+    workDir: "/tmp/wf",
+    maxRoles: 2,
+    council: 3,
+  });
+  assert.ok(plan.roles.length > 2, "the council is deliberately exempt from the cap");
+  assert.ok(
+    plan.notes.some((n) => n.includes("exceeded") && n.includes(String(plan.roles.length))),
+    `the plan must say it shipped more roles than the cap: ${plan.notes.join(" | ")}`,
+  );
+});
+
+test("a read-only role is told to return its report, not to write a file", () => {
+  const plan = planFor("fix the auth bug");
+  const scout = plan.roles.find((r) => r.id === "scout")!;
+  const impl = plan.roles.find((r) => r.id === "implementer")!;
+  assert.ok(!scout.tools.includes("write"), "the scout seat must be read-only");
+
+  // A brief that orders a write the grant cannot perform is an instruction the
+  // agent must fail: it reports the blocked path instead of the findings.
+  const scoutBody = agentMarkdown(plan, scout);
+  assert.ok(!scoutBody.includes("- Write your report to"), "a read-only role must not be told to write");
+  assert.match(scoutBody, /[Rr]eturn your report as your final message/);
+  // The artifact path stays in the brief and names who writes it: the report
+  // belongs at that path either way, and a downstream agent has no way to read
+  // any other agent's message.
+  assert.match(scoutBody, /scout\.md/, "the read-only role must still name its artifact path");
+
+  // A writer still gets its artifact path — that is how the run collects it.
+  assert.match(agentMarkdown(plan, impl), /Write your report to `.*implementation\.md`/);
+});
+
+test("an upstream read-only dependency names its path and who writes it", () => {
+  const plan = planFor("fix the auth bug");
+  const impl = plan.roles.find((r) => r.id === "implementer")!;
+  const scoutArtifact = plan.roles.find((r) => r.id === "scout")!.artifact;
+
+  // The tester waits on the implementer, a read-only dep waits on the scout.
+  const tester = { ...plan.roles.find((r) => r.id === "tester")!, depends_on: ["scout"] };
+  const body = agentMarkdown(plan, tester);
+
+  assert.ok(body.includes("## Upstream artifacts"), "the section must be present");
+  assert.match(
+    body,
+    new RegExp(`\`scout\` → ${scoutArtifact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+    "a read-only dependency must still name its artifact path",
+  );
+  assert.match(body, /orchestrator writes it here/, "and must say who puts it there");
+
+  // A writable dependency needs no such explanation. The tester waits on the
+  // implementer, which writes its own artifact — while the implementer's own
+  // brief still carries the note, because it waits on the read-only planner.
+  const testerBrief = agentMarkdown(plan, plan.roles.find((r) => r.id === "tester")!);
+  assert.ok(
+    !testerBrief.includes("orchestrator writes it here"),
+    "a writable upstream role writes its own report",
+  );
+});
+
+test("the run artifact tree is bounded, keeping the newest runs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-runs-"));
+  const root = join(dir, ".role-fleet");
+  const runs = [1000, 2000, 3000, 4000].map((ms) => `run-${ms}`);
+  for (const r of runs) {
+    await mkdir(join(root, r), { recursive: true });
+    await writeFile(join(root, r, "scout.md"), "report", "utf8");
+  }
+  // Not ours: a sibling note, a file, and a differently-shaped directory.
+  await writeFile(join(root, "notes.md"), "keep me", "utf8");
+  await mkdir(join(root, "run-notanumber"), { recursive: true });
+
+  // Retention, with the current run the newest so nothing is spared as
+  // in-flight: keeping 2 leaves the newest two and prunes the rest.
+  await pruneRunDirs(root, "run-4000", 2);
+  assert.deepEqual(
+    (await readdir(root)).sort(),
+    ["notes.md", "run-3000", "run-4000", "run-notanumber"].sort(),
+    "anything the plugin did not name stays, and only the oldest runs go",
+  );
+
+  // A missing tree is not an error.
+  assert.deepEqual(await pruneRunDirs(join(dir, "nope"), "run-1", 5), []);
+});
+
+test("the run prune orders by value, not by the id's text", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-runs-num-"));
+  const root = join(dir, ".role-fleet");
+  for (const ms of [99, 4000, 1000, 3000]) await mkdir(join(root, `run-${ms}`), { recursive: true });
+
+  // `run-99` sorts *after* `run-4000` as text, so a lexical order would keep it
+  // and delete the newest run. The numeric order keeps `run-4000`.
+  await pruneRunDirs(root, "run-4000", 2);
+  const survivors = await readdir(root);
+  assert.ok(survivors.includes("run-4000"), "the newest run must never be pruned");
+  assert.ok(!survivors.includes("run-99"), "the numerically oldest run is the one to go");
+});
+
+test("a real run prunes its own stale run directories", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-runs-real-"));
+  for (let i = 0; i < 3; i++) await runRoleFleet({ task: `fix bug ${i}`, cwd: dir });
+  const runs = (await readdir(join(dir, ".role-fleet"))).filter((f) => f.startsWith("run-"));
+  assert.ok(runs.length >= 2, "each run leaves its artifact directory");
+
+  // Drive it past the retention window with a long burst.
+  for (let i = 0; i < 12; i++) await runRoleFleet({ task: `fix bug ${i}`, cwd: dir });
+  const after = (await readdir(join(dir, ".role-fleet"))).filter((f) => f.startsWith("run-"));
+  assert.ok(after.length <= 10, `the run tree must stay bounded, found ${after.length}`);
+});
+
+test("the run prune never touches a run newer than the one doing the pruning", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-runs-newer-"));
+  const root = join(dir, ".role-fleet");
+  // The current run finishes late, after a burst of newer runs has started.
+  // Their artifact directories belong to runs still in flight.
+  const current = "run-1000";
+  for (const ms of [500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000]) {
+    await mkdir(join(root, `run-${ms}`), { recursive: true });
+  }
+
+  // Retention of 1 among the eligible (older-or-current) runs, while the ten
+  // newer ones are spared as in-flight.
+  await pruneRunDirs(root, current, 1);
+
+  const survivors = (await readdir(root)).sort();
+  for (const ms of [2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000]) {
+    assert.ok(survivors.includes(`run-${ms}`), `a newer, in-flight run dir was pruned: run-${ms}`);
+  }
+  assert.ok(survivors.includes(current), "the current run's own directory must survive");
+  // Only the genuinely older ones go, bounded by the retention window.
+  assert.ok(!survivors.includes("run-500"), "the oldest eligible run should have been pruned");
+
+  // Nothing eligible at all: every other run is newer, so retention cannot be
+  // reached and nothing may be deleted. This is the discriminating case — drop
+  // the guard and this very setup deletes ten in-flight directories.
+  const onlyNewer = await mkdtemp(join(tmpdir(), "rf-runs-none-"));
+  const root2 = join(onlyNewer, ".role-fleet");
+  for (const ms of [2000, 3000, 4000, 5000]) await mkdir(join(root2, `run-${ms}`), { recursive: true });
+  await pruneRunDirs(root2, "run-1000", 2);
+  assert.deepEqual(
+    (await readdir(root2)).sort(),
+    ["run-2000", "run-3000", "run-4000", "run-5000"],
+    "with nothing older to prune, every in-flight run must survive",
+  );
+
+  // A malformed current id yields NaN, and nothing compares `<= NaN`: fail
+  // safe, deleting nothing, rather than guessing which runs are stale.
+  const odd = await mkdtemp(join(tmpdir(), "rf-runs-nan-"));
+  const root3 = join(odd, ".role-fleet");
+  for (const ms of [1000, 2000, 3000]) await mkdir(join(root3, `run-${ms}`), { recursive: true });
+  assert.deepEqual(await pruneRunDirs(root3, "not-a-run-id", 1), []);
+  assert.equal((await readdir(root3)).length, 3, "an unparseable run id must prune nothing");
+});
+
+test("the gate refuses a malformed plan and names every issue", () => {
+  // Defensive by construction: synthesizePlan, the proposal sandbox and
+  // bindFleet all emit valid shapes, so this branch is unreachable from the
+  // command and the tool. It is tested here directly so a generator that
+  // starts emitting bad shapes fails loudly instead of shipping a broken plan.
+  const broken = {
+    task: "fix the auth bug",
+    cwd: "/tmp",
+    roles: [
+      { ...planFor("fix the auth bug").roles[0], id: "scout", acceptance: [] },
+      { ...planFor("fix the auth bug").roles[0], id: "scout", artifact: "" },
+      { ...planFor("fix the auth bug").roles[0], id: "docs", depends_on: ["ghost"] },
+    ],
+    notes: [],
+  };
+
+  const gate = gatePlan(broken);
+  assert.equal(gate.ok, false);
+  assert.equal(gate.plan, null, "a refused plan must not be handed on");
+  assert.equal(gate.verdict.verdict, "reject");
+  assert.deepEqual(gate.verdict.issues, [
+    "role scout: no acceptance criteria",
+    "duplicate role id scout",
+    "role scout: no artifact path",
+    "role docs: unknown dependency ghost",
+  ]);
+  assert.match(renderVerdict(gate.verdict), /Gate: reject/);
+
+  // An empty plan is refused too, rather than dispatching nothing.
+  assert.equal(gatePlan({ ...broken, roles: [] }).ok, false);
+});
+
+test("a verdict names its outcome and lists every issue", () => {
+  // The verdict is what the user reads when a plan is refused; an issue that
+  // does not appear here is an issue they are never told about.
+  const rejected = renderVerdict({
+    verdict: "reject",
+    reason: "plan failed static validation",
+    issues: ["duplicate role id db-auditor", "role scout: no acceptance criteria"],
+  });
+  assert.match(rejected, /reject/);
+  assert.match(rejected, /duplicate role id db-auditor/);
+  assert.match(rejected, /no acceptance criteria/);
+  assert.ok(!rejected.includes("undefined"), "an absent reason must not print as undefined");
+
+  const approved = renderVerdict({
+    verdict: "approve",
+    reason: "static validation passed",
+    issues: [],
+  });
+  assert.match(approved, /approve/);
+  assert.ok(!approved.includes("!"), "an approval lists no issues");
+});
+
+test("same-millisecond runs get strictly increasing ids, so ordering is decidable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-monotonic-"));
+  // Concurrent calls land in the same millisecond often enough; the ids must
+  // still be strictly increasing, because the prune guard compares them with
+  // `owner > currentRunId` and equal ids make that comparison false.
+  const ids = (await Promise.all([0, 1, 2, 3, 4].map(() =>
+    runRoleFleet({ task: "fix the auth bug", cwd: dir }),
+  ))).map((r) => r.plan!.runId!);
+
+  assert.equal(new Set(ids).size, ids.length, `ids collided: ${ids.join(", ")}`);
+  const sorted = [...ids].sort();
+  assert.deepEqual(ids, sorted, `ids must increase in issue order: ${ids.join(", ")}`);
+  assert.ok(ids.every((id) => /^run-\d+$/.test(id)), `ids must stay numeric: ${ids.join(", ")}`);
+});
+
+test("an older run's prune spares a newer, still-running run's agents", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-concurrent-"));
+  // Two runs issued back to back land in the same millisecond often enough, and
+  // must still be strictly ordered — that ordering is what the prune guard
+  // reads. `older` is deliberately the *narrower* plan, so the sentinel below
+  // is a file it does not write.
+  const older = await runRoleFleet({ task: "update the readme and changelog", cwd: dir });
+  const newer = await runRoleFleet({ task: "fix the auth bug", cwd: dir });
+  assert.ok(
+    Number(newer.plan!.runId!.slice(4)) > Number(older.plan!.runId!.slice(4)),
+    `back-to-back runs must still be ordered: ${older.plan!.runId} then ${newer.plan!.runId}`,
+  );
+
+  // Emit the newer run first, then replay the older plan: the newer run's
+  // files are exactly the ones agents.ts must spare.
+  const agentsDir = join(dir, ".omp", "agents");
+  await emitAgents(newer.plan!, agentsDir);
+  await emitAgents(older.plan!, agentsDir);
+
+  // The sentinel must be a role only the newer run has. A file both runs write
+  // would survive via the `keepSet` short-circuit, so the guard would never be
+  // reached and the test would pass even with the guard deleted.
+  const newerOnly = newer.plan!.roles
+    .map((r) => `rf-${r.id}.md`)
+    .find((f) => !older.plan!.roles.some((r) => `rf-${r.id}.md` === f));
+  assert.ok(newerOnly, "the older plan must be narrower, or nothing is at risk");
+
+  const files = await readdir(agentsDir);
+  assert.ok(
+    files.includes(newerOnly),
+    `a newer run's in-flight agent (${newerOnly}) must survive an older run's prune`,
+  );
 });
 
 test("a vision seat asks for the host's default advisor, not a model pattern", async () => {

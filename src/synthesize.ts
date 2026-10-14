@@ -7,10 +7,7 @@
  */
 import type { Effort, RolePlan, RoleSpec } from "./core.ts";
 import { applySpecialists } from "./library.ts";
-import { aliasFor } from "./core.ts";
-
-const READ_TOOLS = ["read", "grep", "glob"];
-const WRITE_TOOLS = ["read", "grep", "glob", "edit", "write"];
+import { aliasFor, READ_TOOLS, WRITE_TOOLS } from "./core.ts";
 
 const CODE_HINT = /\b(code|bug|fix|refactor|implement|function|test|api|module|crate|rust|typescript|python)\b/i;
 const RESEARCH_HINT = /\b(research|compare|market|competitor|docs?|upstream|library|version|price)\b/i;
@@ -253,7 +250,9 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
           "Findings with file:line or an explicit verdict",
           "No files modified",
         ],
-        depends_on: upstream,
+        // A copy per member: sharing one array across the council means any
+        // later in-place edit of one member's dependencies edits them all.
+        depends_on: [...upstream],
         tools: READ_TOOLS,
         effort: "high",
         needs_vision: false,
@@ -272,6 +271,12 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
     .filter((r) => r.id !== "implementer" && !/^reviewer-c\d$/.test(r.id));
   const roles = overflow.length ? drafted.filter((r) => !overflow.includes(r)) : drafted;
   if (overflow.length) notes.push(`role cap ${maxRoles}: dropped ${overflow.map((r) => r.id).join(", ")}`);
+  // The exempt roles are kept on purpose, but "kept on purpose" is not the same
+  // as "the cap was met": `--max-roles 2 --council 3` ships five roles, and the
+  // plan said nothing. The real fan-out is what the reader budgets against.
+  if (roles.length > maxRoles) {
+    notes.push(`role cap ${maxRoles} exceeded: ${roles.length} roles (council and implementer are exempt)`);
+  }
 
   return { task, cwd, roles, notes };
 }

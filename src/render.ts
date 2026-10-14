@@ -1,5 +1,5 @@
 /** Compact rendering of a plan, a verdict, and the dispatch groups. */
-import type { AdvisorVerdict, RolePlan, RoleSpec } from "./core.ts";
+import type { GateVerdict, RolePlan, RoleSpec } from "./core.ts";
 import type { DispatchGroup } from "./agents.ts";
 
 export function renderPlan(plan: RolePlan, waves: RoleSpec[][]): string {
@@ -16,8 +16,8 @@ export function renderPlan(plan: RolePlan, waves: RoleSpec[][]): string {
   return lines.join("\n");
 }
 
-export function renderVerdict(v: AdvisorVerdict): string {
-  const lines = [`Gate (${v.source}): ${v.verdict}`];
+export function renderVerdict(v: GateVerdict): string {
+  const lines = [`Gate: ${v.verdict}`];
   if (v.reason) lines.push(`  ${v.reason}`);
   for (const i of v.issues) lines.push(`  ! ${i}`);
   return lines.join("\n");
@@ -34,13 +34,50 @@ function rosterName(a: { role: string; model: string }): string {
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join("");
-  return `${role} ${alias}`.slice(0, 32);
+  return `${role} ${alias}`;
+}
+
+/** The task tool's budget for a roster id. */
+const ROSTER_LIMIT = 32;
+
+/**
+ * Roster ids for a whole run, allocated once so no two agents share one.
+ *
+ * The id is the thing the main model addresses agents by, so truncation that
+ * makes two of them equal is worse than a longer id: two generated roles
+ * sharing a long prefix on the same alias would both become `PaymentDomainA…`,
+ * and the reviewer would have no way to say which is which. Collisions get a
+ * numeric suffix and a tighter truncation rather than a silent duplicate.
+ */
+function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string }>): string[] {
+  const used = new Set<string>();
+  return agents.map((a) => {
+    const base = rosterName(a).slice(0, ROSTER_LIMIT);
+    if (!used.has(base)) {
+      used.add(base);
+      return base;
+    }
+    for (let n = 2; ; n++) {
+      const suffix = ` ${n}`;
+      const candidate = `${rosterName(a).slice(0, ROSTER_LIMIT - suffix.length)}${suffix}`;
+      if (!used.has(candidate)) {
+        used.add(candidate);
+        return candidate;
+      }
+    }
+  });
 }
 
 /** Markdown the main model acts on: one task batch per wave. */
 export function renderDispatch(groups: DispatchGroup[], agentDir: string): string {
   if (!groups.length) return "No roles to dispatch.";
   const lines: string[] = [];
+  // Allocated across every wave, not per wave: the roster id is how the main
+  // model refers to an agent for the whole run, so uniqueness is a run-level
+  // property even though each wave is its own dispatch batch.
+  const everyAgent = groups.flatMap((g) => g.agents);
+  const names = allocateRosterNames(everyAgent);
+  const nameOf = new Map(everyAgent.map((a, i) => [a.agent, names[i]!]));
   groups.forEach((g, i) => {
     const label = g.conflicted
       ? " — dependency conflict: dispatch sequentially and reconcile"
@@ -55,7 +92,7 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
     lines.push(
       "```json",
       JSON.stringify(
-        g.agents.map((a) => ({ name: rosterName(a), agent: a.agent })),
+        g.agents.map((a) => ({ name: nameOf.get(a.agent), agent: a.agent })),
         null,
         2,
       ),

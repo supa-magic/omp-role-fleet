@@ -8,9 +8,7 @@
  * RoleSpec — the rest of the pipeline treats it like any other role.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-
-const READ_TOOLS = ["read", "grep", "glob"];
-const WRITE_TOOLS = ["read", "grep", "glob", "edit", "write"];
+import { READ_TOOLS, WRITE_TOOLS } from "./core.ts";
 
 export interface Specialist {
   /** Matched against the task text; a specialist joins the plan when it hits. */

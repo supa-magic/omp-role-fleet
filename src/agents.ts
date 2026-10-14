@@ -10,7 +10,8 @@
  * the files land flat in one agents root; per-run isolation comes from
  * rewriting the same names, and stale generated files are pruned.
  */
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec } from "./core.ts";
 import { planWaves } from "./core.ts";
@@ -19,7 +20,9 @@ import { SPECIALIST_DESCRIPTIONS } from "./library.ts";
 /** Marks a file as plugin-generated so stale runs can be pruned safely. */
 const GENERATED_MARKER = "<!-- role-fleet:generated -->";
 
-/** Which run wrote this file: `run-<epoch ms>`, so runs order lexicographically. */
+/** Which run wrote this file: `run-<epoch ms>`, so runs order lexicographically.
+ *  Ids are strictly increasing (see `nextRunId`), which is what lets the prune
+ *  guard tell "stale, finished run" from "newer run still in flight". */
 const RUN_MARKER = /<!-- role-fleet:run (run-\d+) -->/;
 
 function runStamp(runId: string | undefined): string {
@@ -99,7 +102,15 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec): string {
   const upstream = deps
     .map((d) => {
       const dep = plan.roles.find((r) => r.id === d);
-      return dep ? `- \`${dep.id}\` → ${dep.artifact}` : null;
+      if (!dep) return null;
+      // A read-only dep cannot write its own artifact, but the path is still where
+      // the report belongs: the agent returns it and the orchestrator places it
+      // there. Saying "its final message" instead would name a channel the
+      // downstream agent cannot read — it has no link to any other agent. A
+      // writable dep writes the file itself and needs no such note.
+      return dep.tools.some((t) => t === "write" || t === "edit")
+        ? `- \`${dep.id}\` → ${dep.artifact}`
+        : `- \`${dep.id}\` → ${dep.artifact} (read-only role — it returns the report, the orchestrator writes it here)`;
     })
     .filter(Boolean)
     .join("\n");
@@ -133,7 +144,16 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec): string {
     "- One writer per file; never edit files owned by another role in this plan.",
     "- Do not expand scope. Smallest correct change.",
     "- Report blockers with evidence. Never invent APIs or claim a check you did not run.",
-    `- Write your report to \`${role.artifact}\`.`,
+    // A role that cannot write must not be told to write. A read-only seat
+    // (scout, reviewer, security-auditor) has no write tool, so an artifact
+    // path in its brief is an instruction it cannot follow — the agent then
+    // reports the blocked path instead of the findings, and the work is lost.
+    // It returns the report; whoever runs the fleet puts it at that path.
+    ...(role.tools.some((t) => t === "write" || t === "edit")
+      ? [`- Write your report to \`${role.artifact}\`.`]
+      : [
+          `- You have no write access. Return your report as your final message — it belongs at \`${role.artifact}\`, and the orchestrator writes it there.`,
+        ]),
     "",
   ].join("\n");
 }
@@ -185,6 +205,58 @@ export async function pruneGeneratedAgents(
       removed.push(target);
     } catch {
       // Unreadable or already gone: leave it alone.
+    }
+  }
+  return removed;
+}
+
+/** A run directory this plugin created: `run-<epoch ms>`, nothing else. */
+const RUN_DIR = /^run-(\d+)$/;
+
+/**
+ * Keep the per-run artifact tree bounded: delete all but the newest `keep`
+ * run directories under `root`.
+ *
+ * Every non-dry run creates `<repo>/.role-fleet/run-<id>/`, so without this the
+ * tree grows by one directory per run forever. Retention is by count rather
+ * than age, because count is what bounds the damage: an age rule deletes the run
+ * you still want from yesterday's session while leaving an afternoon's burst of
+ * two hundred runs untouched. Keeping more than one matters too — a reviewer
+ * reads the scout's artifact from an earlier wave of the same run.
+ *
+ * Only `run-<digits>` directories are touched, never a symlink, never the
+ * current run, never a *newer* one, and never anything else in `.role-fleet/`.
+ * Anything the plugin did not name, it does not delete.
+ */
+export async function pruneRunDirs(root: string, currentRunId: string, keep: number): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const currentAt = Number(RUN_DIR.exec(currentRunId)?.[1] ?? Number.NaN);
+  const runs = entries
+    .filter((e) => e.isDirectory() && RUN_DIR.test(e.name))
+    .map((e) => ({ name: e.name, at: Number(RUN_DIR.exec(e.name)![1]) }))
+    // Numeric, not lexical: ordering must not depend on the epoch's digit count.
+    .sort((a, b) => b.at - a.at)
+    // Spare the current run and anything newer than it. Ids are strictly
+    // increasing (`nextRunId`), so a newer directory belongs to a run still in
+    // flight — the same invariant the agent prune keeps with `owner >
+    // currentRunId`. Without it, one slow run finishing after a burst of eleven
+    // would delete every one of those in-flight artifact directories.
+    .filter((r) => r.at <= currentAt);
+
+  const removed: string[] = [];
+  // `keep` counts the current run: the newest `keep` eligible directories are
+  // kept, the rest go.
+  for (const stale of runs.slice(Math.max(0, keep))) {
+    try {
+      await rm(join(root, stale.name), { recursive: true, force: true });
+      removed.push(join(root, stale.name));
+    } catch {
+      // Already gone, or not ours to remove: leave it.
     }
   }
   return removed;

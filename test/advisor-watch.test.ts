@@ -9,7 +9,10 @@ import {
   isAdvisorAgent,
   isAdvisorySeverity,
   readAdvise,
+  recentNotes,
+  recordNote,
   renderNotes,
+  resetNotes,
   worstSeverity,
   type AdvisorNote,
 } from "../src/advisor-watch.ts";
@@ -34,6 +37,35 @@ test("advise arguments parse into a note with a severity", () => {
 test("severity values are validated strictly", () => {
   for (const v of ["nit", "concern", "blocker"]) assert.equal(isAdvisorySeverity(v), true);
   for (const v of ["warning", "BLOCKER", 1, null]) assert.equal(isAdvisorySeverity(v), false);
+});
+
+test("the session buffer records, caps, and resets", () => {
+  // This state is process-level and shared by every test in the file, so it is
+  // reset up front rather than relying on file order.
+  resetNotes();
+  assert.deepEqual(recentNotes(), []);
+
+  recordNote({ severity: "nit", note: "first", advisor: "advisor", at: 1 });
+  recordNote({ severity: "concern", note: "second", advisor: "advisor", at: 2 });
+  // Newest first: the buffer is read as a running log.
+  assert.deepEqual(recentNotes().map((n) => n.note), ["second", "first"]);
+  assert.equal(worstSeverity(), "concern");
+
+  // The cap is a memory bound, so the *oldest* notes are the ones dropped.
+  for (let i = 0; i < 60; i++) {
+    recordNote({ severity: "nit", note: `n${i}`, advisor: "advisor", at: 100 + i });
+  }
+  const capped = recentNotes(1000);
+  assert.equal(capped.length, 50, "the buffer must not grow without bound");
+  assert.equal(capped[0].note, "n59", "the newest note must survive");
+  assert.ok(!capped.some((n) => n.note === "first"), "the oldest notes are dropped first");
+
+  // A new session must start empty; without this the buffer leaks across
+  // sessions in the same process.
+  resetNotes();
+  assert.deepEqual(recentNotes(), []);
+  assert.equal(worstSeverity(), null);
+  assert.match(renderNotes(), /No advisor notes/);
 });
 
 test("the worst severity wins and empty history reports none", () => {

@@ -139,6 +139,108 @@ test("an invented model, tool, or dependency invalidates the whole proposal", ()
   for (const v of variants) assert.equal(parseProposal(v), null, `accepted: ${v.slice(0, 40)}`);
 });
 
+test("a grant that mixes a real tool with a rogue one is refused whole", () => {
+  // Filtering the rogue tool out made `["read","bash"]` a valid read-only role,
+  // so a proposal could request a tool it may not have and still be accepted.
+  // The sandbox refuses the element instead, like a wrong dependency.
+  const mixed = JSON.stringify([
+    {
+      id: "x-auditor",
+      title: "X",
+      mission: "Do the thing carefully",
+      acceptance: ["a"],
+      tools: ["read", "bash"],
+      effort: "low",
+      model: "@slow",
+      dependsOn: [],
+    },
+  ]);
+  assert.equal(parseProposal(mixed), null, "a mixed valid/rogue grant must be refused");
+
+  // The all-valid grant of the same shape still passes.
+  assert.equal(parseProposal(mixed.replace("bash", "grep"))?.length, 1);
+});
+
+test("a dependency that leaves the plan is reported, not dropped in silence", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-sever-"));
+  // The sandbox accepts a dependency on any reserved id, but a role the plan
+  // does not contain cannot be waited on. Dropping the edge silently made the
+  // proposed role run earlier than the proposal asked for.
+  const result = await runRoleFleet({
+    task: "assess the regulatory exposure of our payment data pipeline",
+    cwd: dir,
+    dryRun: true,
+    specialist: true,
+    maxRoles: 6,
+    propose: async () =>
+      JSON.stringify([
+        // `implementer` is reserved but absent from an analysis-only plan.
+        { id: "ledger-auditor", title: "L", mission: "Audit the ledger", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: ["implementer"] },
+      ]),
+  });
+
+  const auditor = result.plan!.roles.find((r) => r.id === "ledger-auditor");
+  assert.ok(auditor, "the proposal itself is valid and must merge");
+  assert.deepEqual(auditor.depends_on, [], "the unresolvable edge cannot be honoured");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("ledger-auditor") && n.includes("implementer")),
+    `the severed edge must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("asking for the specialist tier on a host without side turns says so", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-noside-"));
+  // `--specialist` on such a host is a silent no-op unless the plan says why.
+  const result = await runRoleFleet({ task: "fix the auth bug", cwd: dir, dryRun: true, specialist: true });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `the skipped tier must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+
+  // Without the flag there is nothing to report — the tier was never asked for.
+  const plain = await runRoleFleet({ task: "fix the auth bug", cwd: dir, dryRun: true });
+  assert.ok(!plain.plan!.notes.some((n) => n.includes("unavailable")));
+});
+
+test("a proposal claiming an id the plan already uses is discarded, not merged", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-collide-"));
+  const propose = async (id: string) => async () =>
+    JSON.stringify([
+      { id, title: "F", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] },
+    ]);
+
+  // The council mints `reviewer-c1`… after the parser's reserved list is
+  // built, so the parser alone cannot see the collision. Merging it made
+  // `validatePlan` refuse the whole plan and destroyed a healthy council run.
+  for (const id of ["reviewer-c1", "reviewer-c3"]) {
+    const result = await runRoleFleet({
+      task: "review with different providers",
+      cwd: dir,
+      dryRun: true,
+      specialist: true,
+      maxRoles: 8,
+      propose: await propose(id),
+    });
+    assert.equal(result.ok, true, `a colliding proposal must not take down the run (${id})`);
+    assert.ok(
+      result.plan!.notes.some((n) => n.includes(id) && n.includes("already in use")),
+      `the collision must be reported: ${result.plan!.notes.join(" | ")}`,
+    );
+  }
+
+  // A non-colliding proposal on the same run still merges.
+  const merged = await runRoleFleet({
+    task: "review with different providers",
+    cwd: dir,
+    dryRun: true,
+    specialist: true,
+    maxRoles: 8,
+    propose: await propose("threat-modeler"),
+  });
+  assert.ok(merged.plan!.roles.some((r) => r.id === "threat-modeler"), "a clean proposal must still be merged");
+});
+
 test("more than three proposed roles is refused outright", () => {
   const one = { id: "a-one", title: "A", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] };
   const many = JSON.stringify([one, { ...one, id: "b-two" }, { ...one, id: "c-three" }, { ...one, id: "d-four" }]);
@@ -322,6 +424,20 @@ test("dispatch items carry roster names and no phantom model field", async () =>
     assert.ok(m[1]!.length <= 32, `name too long: ${m[1]}`);
   }
 });
+test("a proposal naming the same id twice is discarded whole", () => {
+  // Two elements with one id each pass every per-element check, then merge into
+  // a plan `validatePlan` rejects as a duplicate — taking a healthy static cast
+  // down with them. The proposal is not an upgrade the run depends on, so any
+  // doubt keeps the static cast.
+  const dupes = parseProposal(
+    JSON.stringify([
+      { id: "db-auditor", title: "A", mission: "Audit the schema", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] },
+      { id: "db-auditor", title: "B", mission: "Audit it again", acceptance: ["a"], tools: ["grep"], effort: "low", model: "@task", dependsOn: [] },
+    ]),
+  );
+  assert.equal(dupes, null, "a duplicate id must invalidate the proposal, not the plan");
+});
+
 test("a proposal's seat is derived, never echoed: write tools mean implementer, read-only means reviewer", () => {
   // G19: the generated role must carry a real seat, because allowlist mode
   // routes by seat — a literal or attacker-chosen core would silently un-pin

@@ -13,8 +13,8 @@ plugin: scout → planner → implementer → tester → reviewer
 ```
 
 No config file, no roster to maintain, no `agents/*.md` to hand-write. The
-plugin writes those agent definitions for you, per run, and cleans up after
-itself.
+plugin writes those agent definitions for you, per run, and prunes the previous
+run's on the next one.
 
 ---
 
@@ -76,7 +76,7 @@ them: each agent shows its resolved model, status, and token usage as it works.
 | `--dry-run`, `-n` | Plan only. Writes nothing. |
 | `--council [N]` | Replace the single reviewer with N reviewers on different models. |
 | `--max-roles N` | Cap on generated roles (default 4, hard max 8). |
-| `--allowlist FILE` | Pin models to a file instead of using `@` aliases. |
+| `--allowlist FILE` | Pin models to a file instead of using `@` aliases. A leading `~` is expanded. |
 | `--specialist` | Force an extra model call to propose extra specialist roles. |
 
 Two of these are worth explaining, because they change the rules rather than the
@@ -128,6 +128,10 @@ cast. Without the flag the plugin still does this on its own when the static cas
 looks thin, or when your task text contains "specialist", "expert", or
 "consultant".
 
+The proposal needs an ephemeral side turn. On a host that does not provide one
+the tier is simply absent — `--specialist` then does nothing, quietly, and the
+static cast runs as usual.
+
 ---
 
 ## Review council
@@ -150,9 +154,10 @@ adopt the **most conservative** finding as the verdict — a risk one reviewer s
 is a risk, even if the other two missed it.
 
 Two details that surprise people: the council ignores `--max-roles`, because
-dropping reviewers to fit a budget would silently undo the review you asked for;
-and on analysis-only tasks its members join after the scout rather than replacing
-a reviewer that was never going to exist.
+dropping reviewers to fit a budget would silently undo the review you asked for
+(the plan says so in a note when the exempt roles push the real count past the
+cap); and on analysis-only tasks its members join after the scout rather than
+replacing a reviewer that was never going to exist.
 
 ---
 
@@ -204,7 +209,10 @@ read-only `security-auditor` joins security wording on `@slow`; a
 `migration-runner` **replaces** the implementer for migrations, because a
 migration is implementation and two writers on the same files is a defect, not a
 feature. Audit-shaped tasks without build verbs drop the implementer and the
-tester, so the auditor is never squeezed out by the role cap.
+tester, so the auditor is never squeezed out by the role cap. On a task that
+*does* carry a build verb — "fix the injection bug" — the base cast already
+fills the cap and the auditor is the one dropped, with a note saying so; raise
+`--max-roles` to seat it.
 
 > The designer seat is pinned to `@designer`, which is **not** a stock omp role.
 > Add a `modelRoles.designer` entry in `/model`, or that seat falls back to
@@ -236,9 +244,18 @@ running it.
 
 - **No secrets.** The package has zero runtime dependencies and the only host
   import is type-only, so nothing from your environment is pulled in.
-- **Writes are scoped.** Generated agents land in `<repo>/.omp/agents/rf-*.md` and
-  nowhere else. Pruning only ever deletes files that carry this plugin's own
-  generated marker *and* whose frontmatter name matches their filename.
+- **Writes are scoped.** Generated agents land in `<repo>/.omp/agents/rf-*.md`.
+  Each run also pre-creates its own artifact directory
+  `<repo>/.role-fleet/run-<id>/`, so a worker never inherits a missing parent.
+  That tree is bounded: the newest **10** run directories are kept and older ones
+  deleted on the next run — by count, not by age, since count is what bounds the
+  damage. Nothing outside `.role-fleet/` and `.omp/agents/` is touched, and
+  anything the plugin did not name it will not delete: prune removes only
+  `run-<digits>` directories, and never the current run or one newer than it —
+  a newer id belongs to a run still in flight, so a burst of concurrent runs
+  cannot delete an in-flight run's artifacts. Pruning of agent files likewise
+  only ever deletes files carrying this plugin's own generated marker *and*
+  whose frontmatter name matches their filename.
 - **Prune-safe.** A hand-written `agent.md`, or a generated one you renamed, is
   never deleted.
 - **`role_fleet_plan` is `approval: "write"`**, because it does write files. Under

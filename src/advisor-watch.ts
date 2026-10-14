@@ -46,7 +46,7 @@ export function isAdvisorAgent(agent: ExtensionAgentIdentity | undefined): boole
 /** Pull `{note, severity}` out of an `advise` tool call's arguments. */
 export function readAdvise(args: unknown): { note: string; severity: AdvisorSeverity } | null {
   if (typeof args !== "object" || args === null) return null;
-  const a = args as { note?: unknown; severity?: unknown; guidance?: unknown };
+  const a = args as { note?: unknown; severity?: unknown };
   if (typeof a.note !== "string") return null;
   return {
     note: a.note,

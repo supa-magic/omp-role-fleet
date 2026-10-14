@@ -10,19 +10,22 @@
  * count past the cap.
  */
 import type { Effort, RoleSpec } from "./core.ts";
+import { WRITE_TOOLS } from "./core.ts";
 
 /** One cheap model call; injected so tests run without a provider. */
 export type RoleProposer = (task: string) => Promise<string>;
 
-export const PROPOSED_ALIAS = new Set(["@smol", "@task", "@slow", "@plan", "@designer", "@vision"]);
-const ALLOWED_TOOLS = ["read", "grep", "glob", "edit", "write"];
+const PROPOSED_ALIAS = ["@smol", "@task", "@slow", "@plan", "@designer", "@vision"];
+// Derived, not a third copy: the sandbox may grant a proposed role exactly the
+// tools a hand-written writer seat gets, so the two can never drift apart.
+const ALLOWED_TOOLS: readonly string[] = WRITE_TOOLS;
 const ALLOWED_EFFORT = new Set<Effort>(["minimal", "low", "medium", "high", "xhigh"]);
 
 const PROMPT = [
   "You propose specialist agent roles for one task. Reply with ONLY a JSON array, no prose.",
   "Each element: {\"id\":\"kebab-case-id\",\"title\":\"...\",\"mission\":\"one sentence\",",
   "\"acceptance\":[\"check 1\",\"check 2\"],\"tools\":[...subset of " + JSON.stringify(ALLOWED_TOOLS) + "],",
-  "\"effort\":\"one of minimal|low|medium|high|xhigh\",\"model\":\"one of " + JSON.stringify([...PROPOSED_ALIAS]) + "\",",
+  "\"effort\":\"one of minimal|low|medium|high|xhigh\",\"model\":\"one of " + JSON.stringify(PROPOSED_ALIAS) + "\",",
   "\"dependsOn\":[\"ids of other proposed roles, usually empty\"]}",
   "At most 3 roles. Read-only analysis gets [\"read\",\"grep\",\"glob\"].",
 ].join("\n");
@@ -56,12 +59,17 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
     : [];
   if (acceptance.length < 1) return null;
 
-  const tools = Array.isArray(raw.tools)
-    ? raw.tools.filter((t): t is string => typeof t === "string" && ALLOWED_TOOLS.includes(t))
-    : [];
+  // A tool outside the grant list invalidates the element, it is not silently
+  // dropped: filtering made `["read","bash"]` a valid read-only role, so a
+  // proposal could ask for a tool it may not have and still be accepted — the
+  // very thing the sandbox exists to refuse. Same rule as a wrong dependency.
+  if (!Array.isArray(raw.tools) || raw.tools.some((t) => typeof t !== "string" || !ALLOWED_TOOLS.includes(t))) {
+    return null;
+  }
+  const tools: string[] = raw.tools;
   if (!tools.length) return null;
 
-  const model = typeof raw.model === "string" && PROPOSED_ALIAS.has(raw.model) ? raw.model : null;
+  const model = typeof raw.model === "string" && PROPOSED_ALIAS.includes(raw.model) ? raw.model : null;
   if (!model) return null;
 
   const effort =
@@ -129,9 +137,21 @@ export function parseProposal(reply: string): RoleSpec[] | null {
   if (!Array.isArray(parsed) || !parsed.length || parsed.length > 3) return null;
 
   const declared = new Set<string>();
+  const ids = new Set<string>();
   for (const item of parsed) {
     const id = (item as RawRole).id;
     if (typeof id === "string" && id) declared.add(id);
+  }
+  // A proposal that names the same id twice must be discarded whole, not merged
+  // into the static cast: `validatePlan` rejects duplicate role ids, so both
+  // elements would survive every per-element check only to fail the gate and
+  // take a perfectly good static cast down with them. Same all-or-nothing rule
+  // as every other constraint here.
+  for (const item of parsed) {
+    const id = (item as RawRole).id;
+    if (typeof id !== "string" || !id) continue;
+    if (ids.has(id)) return null;
+    ids.add(id);
   }
 
   const roles: RoleSpec[] = [];

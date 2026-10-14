@@ -14,13 +14,13 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { runRoleFleet, type RunResult } from "./pipeline.ts";
+import { expandHome, runRoleFleet, type RunResult } from "./pipeline.ts";
 import { renderDispatch, renderPlan, renderVerdict } from "./render.ts";
 import { isAdvisorAgent, readAdvise, recordNote, renderNotes, resetNotes, worstSeverity } from "./advisor-watch.ts";
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.0.0";
+const PLUGIN_VERSION = "1.1.0";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -45,6 +45,12 @@ interface Flags {
   specialist?: boolean;
   council?: number;
 }
+
+/** A prompt is not a shell: `~` reaches `parseFlags` literally and `readFile`
+ *  cannot resolve it, so `--allowlist ~/fleet.json` failed with an ENOENT naming
+ *  a path that does not exist. Expanded here so the flag reflects what will be
+ *  opened, and again in `runRoleFleet` for the tool and env surfaces.
+ *  `export ROLE_FLEET_ALLOWLIST=...` is expanded by the shell and needs none. */
 
 export function parseFlags(words: string[]): { flags: Flags; task: string; problems: string[] } {
   const flags: Flags = { dryRun: false };
@@ -73,6 +79,15 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
     const next = words[index + 1];
     return next !== undefined && !next.startsWith("-") ? next : undefined;
   };
+  // A numeric flag takes the next word only when that word really is a number.
+  // Otherwise `--max-roles fix the bug` consumed "fix" as the cap, the cap was
+  // rejected as non-numeric, and "fix" was gone from the task text too — the
+  // user got a warning about a flag they typed correctly and a task that had
+  // quietly lost its first word. A non-numeric follower stays task text.
+  const takeNumber = (index: number): string | undefined => {
+    const next = takeValue(index);
+    return next !== undefined && /^\d+$/.test(next) ? next : undefined;
+  };
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     if (word === "--dry-run" || word === "-n") flags.dryRun = true;
@@ -83,7 +98,7 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
         // the user never named.
         problems.push('--allowlist needs a file path, ignoring it');
       } else {
-        flags.allowlist = value;
+        flags.allowlist = expandHome(value);
         i++;
       }
     } else if (word.startsWith("--allowlist=")) {
@@ -91,26 +106,50 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
       // ROLE_FLEET_ALLOWLIST or to unpinned alias mode without a word.
       const value = word.slice("--allowlist=".length);
       if (value === "") problems.push("--allowlist needs a file path, ignoring it");
-      else flags.allowlist = value;
+      else flags.allowlist = expandHome(value);
     }
     else if (word === "--max-roles") {
-      const value = takeValue(i);
-      if (value !== undefined) i++;
-      flags.maxRoles = numeric(value, "--max-roles", MAX_ROLES);
+      const value = takeNumber(i);
+      const follower = takeValue(i);
+      if (value !== undefined) {
+        i++;
+        flags.maxRoles = numeric(value, "--max-roles", MAX_ROLES);
+      } else if (follower !== undefined) {
+        // Name the word the user actually typed: "(got \"\")" sent them
+        // looking for a missing argument they had in fact supplied. The word
+        // stays task text rather than being swallowed as a bogus cap.
+        problems.push(`--max-roles needs a positive whole number, got "${follower}" — keeping the default, treating it as task text`);
+      } else {
+        flags.maxRoles = numeric(value, "--max-roles", MAX_ROLES);
+      }
     } else if (word.startsWith("--max-roles=")) flags.maxRoles = numeric(word.slice("--max-roles=".length), "--max-roles", MAX_ROLES);
     else if (word === "--specialist") flags.specialist = true;
     else if (word === "--council") {
       // `--council` is bare (size 3), but `--council 5` must consume the number:
       // left unconsumed it landed in the task text of every emitted agent.
-      const value = takeValue(i);
+      const value = takeNumber(i);
+      const follower = takeValue(i);
       if (value !== undefined) {
         i++;
         flags.council = numeric(value, "--council", MAX_COUNCIL);
       } else {
+        if (follower !== undefined) {
+          // `--council abc` used to mean a full council of 3, silently. Reading
+          // a typo as a larger-than-asked fan-out is the expensive direction,
+          // so it is reported rather than guessed.
+          problems.push(`--council needs a positive whole number, got "${follower}" — running the default council, treating it as task text`);
+        }
         flags.council = MAX_COUNCIL;
       }
     } else if (word.startsWith("--council=")) flags.council = numeric(word.slice("--council=".length), "--council", MAX_COUNCIL);
-    else rest.push(word);
+    else if (word.startsWith("-")) {
+      // An unrecognized flag is not task text: it would otherwise reach the
+      // synthesis heuristics and, verbatim, the brief of every emitted agent.
+      // Reported, never silently dropped — the word stays in the task so nothing
+      // the user typed disappears.
+      problems.push(`unknown flag "${word}" — treated as part of the task text`);
+      rest.push(word);
+    } else rest.push(word);
   }
   return { flags, task: rest.join(" ").trim(), problems };
 }
@@ -162,7 +201,7 @@ const FLAG_COMPLETIONS: ArgumentCompletion[] = [
 function completeArguments(prefix: string): ArgumentCompletion[] | null {
   if (/^--allowlist[ =]/.test(prefix)) {
     const typed = prefix.replace(/^--allowlist[ =]\s*/, "");
-    return ALLOWLIST_SUGGESTIONS.filter(
+    return allowlistSuggestions().filter(
       (c) => c.path.includes(typed) && existsSync(c.path),
     ).map((c) => ({ value: `--allowlist ${c.path}`, label: `--allowlist ${c.path}` }));
   }
@@ -173,12 +212,20 @@ function completeArguments(prefix: string): ArgumentCompletion[] | null {
   return hits.length ? hits : null;
 }
 
-/** Well-known allowlist locations, suggested only when they exist. */
-const ALLOWLIST_SUGGESTIONS: Array<{ path: string }> = [
-  { path: join(process.cwd(), ".omp", "role-fleet.json") },
-  { path: join(homedir(), ".omp", "agent", "role-fleet.json") },
-  { path: join(homedir(), ".orch", "fleet.json") },
-];
+/** Well-known allowlist locations, suggested only when they exist.
+ *
+ *  Built per call so a change of working directory is picked up, but still
+ *  resolved against `process.cwd()`: the host calls argument completions with
+ *  the prefix only, so no session cwd reaches here. A session started outside
+ *  its project therefore gets no project-local suggestion — an omission, not a
+ *  wrong path, since every entry is existence-filtered. */
+function allowlistSuggestions(): Array<{ path: string }> {
+  return [
+    { path: join(process.cwd(), ".omp", "role-fleet.json") },
+    { path: join(homedir(), ".omp", "agent", "role-fleet.json") },
+    { path: join(homedir(), ".orch", "fleet.json") },
+  ];
+}
 
 /**
  * Build a role proposer from the host's ephemeral side turn, when available.
@@ -311,7 +358,10 @@ export default function roleFleet(pi: ExtensionAPI): void {
     // Declaring "read" let a mutation ride in under a read-tier policy.
     approval: "write",
     parameters: z.object({
-      task: z.string().describe("The user task to decompose into roles"),
+      // A blank task cannot produce a meaningful plan, and the command path
+      // already refuses one with usage. Without the bound the tool planned an
+      // empty plan and returned an approved verdict for a task nobody asked.
+      task: z.string().min(1).describe("The user task to decompose into roles"),
       maxRoles: z.number().int().min(1).max(MAX_ROLES).optional().describe("Cap on generated roles (default 4)"),
       allowlist: z.string().optional().describe("Pin models to an allowlist JSON file"),
       dryRun: z.boolean().optional().describe("Plan without writing agent definitions"),
