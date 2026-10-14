@@ -107,18 +107,26 @@ test("the banner version is the published version", () => {
   // PLUGIN_VERSION is a hand-kept copy of package.json#version, and it is what
   // `/role-fleet --version` and the session banner show. When the two drift, the
   // first thing a user reports is "the plugin says it is a different version".
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    name: string;
+    version: string;
+  };
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const declared = /PLUGIN_VERSION = "([^"]+)"/.exec(src)?.[1];
   assert.ok(declared, "src/index.ts must declare PLUGIN_VERSION");
   assert.equal(declared, pkg.version);
 
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as {
+    name: string;
     version: string;
-    packages: Record<string, { version?: string }>;
+    packages: Record<string, { name?: string; version?: string }>;
   };
   assert.equal(lock.version, pkg.version);
   assert.equal(lock.packages[""]?.version, pkg.version);
+  // A rename that misses the lockfile leaves `npm ci` installing this package
+  // under its old name, which then disagrees with every artifact it builds.
+  assert.equal(lock.name, pkg.name);
+  assert.equal(lock.packages[""]?.name, pkg.name);
 });
 
 test("a non-numeric flag is reported instead of silently becoming NaN", () => {
