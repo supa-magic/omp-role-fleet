@@ -1,140 +1,93 @@
 # omp-role-fleet
 
-Split a task into agent roles and dispatch them in parallel waves.
+**One task in. A team of specialised agents out.** Give oh-my-pi a piece of work
+and this plugin decides who should do what, gives each of them their own model,
+runs them in waves, and hands the result back to the main model.
 
 <https://github.com/supa-magic/omp-role-fleet>
 
 ```
-task → scout → planner (multi-file only) → implementer → tester/reviewer
-     → each role becomes a real omp agent with its own model
-     → waves: roles inside a wave run in parallel, waves run in order
+you:   refactor the auth module across several files and review it
+plugin: scout → planner → implementer → tester → reviewer
+        each one runs on the model that suits it, in dependency order
 ```
 
-**Zero configuration.** Each role's model is an omp model-role alias
-(`@smol`, `@plan`, `@task`, `@slow`, `@vision`) that the host resolves through
-your `modelRoles`. Which concrete model stands behind `@slow` is your decision in
-`/model`, the way every omp user already knows. When you do need pinned models,
-pass an allowlist file.
+No config file, no roster to maintain, no `agents/*.md` to hand-write. The
+plugin writes those agent definitions for you, per run, and cleans up after
+itself.
+
+---
 
 ## Install
 
 ```sh
-omp plugin install omp-role-fleet        # from the npm registry
+omp plugin install @supa-magic/omp-role-fleet
 ```
 
-From a checkout, link it instead — a local path is symlinked, not copied:
+Then **start a new session**. Extension modules load at session start and
+`/reload-plugins` does not rebuild them, so a running session never picks up
+freshly installed plugin code. Check that it took with:
+
+```sh
+omp plugin list          # is it enabled?
+/role-fleet --version    # which version is loaded?
+```
+
+Working from a checkout instead? Link it — a local path is symlinked, not
+copied, so your edits are live:
 
 ```sh
 omp plugin link ./omp-role-fleet
 ```
 
-Check what is enabled with `omp plugin list`, then start a new session: extension
-modules load at session start, and `/reload-plugins` does not rebuild them, so a
-running session never picks up freshly installed plugin code.
+**Requires:** oh-my-pi 18.10 or newer. The plugin ships as TypeScript and the
+host loads it as-is — no build step, no runtime dependencies. Node 22.6+ is
+only needed to run the test suite from a checkout.
 
-Requires omp 18.10+ — the plugin ships as TypeScript and the host loads it
-as-is, with no build step and no runtime dependencies. Node 22.6+ is only needed
-to run the test suite from a checkout.
+---
 
-## Use
+## Your first run
 
-```text
-/role-fleet refactor the auth module across several files and review it
-/role-fleet fix the login bug --dry-run
-/role-fleet fix the auth bug and review it --council
-/role-fleet view with different providers          # council wording auto-triggers
-/role-fleet audit the api for injection            # specialist seats join
-```
-
-`/role-fleet --version` prints the loaded plugin version — the quickest way to tell
-a fresh install from a stale session.
-
-The `role_fleet_plan` tool is available to the model itself — it can request a
-plan through an ordinary call.
-
-## What happens
-
-```mermaid
-flowchart TD
-  A[task text] --> B[synthesize roles]
-  B --> C[bind each role to a<br/>model-role alias]
-  C --> D{static gate}
-  D -- fail --> X[refuse, report issues]
-  D -- pass --> E[write agent .md files<br/>into .omp/agents]
-  E --> F[wave 1 parallel] --> G[wave 2] --> H[...]
-```
-
-1. **Synthesize** — the shape of the task decides the cast: investigation,
-   planning (multi-file work only), implementation, tests, review, docs. A role
-   cap (default 4) bounds fan-out; when it bites, the implementer is the last
-   role dropped.
-2. **Bind** — each role takes an alias: recon and test runs ride `@smol`
-   (mechanical work), planning rides `@plan`, implementation rides `@task` — the
-   planner already did the heavy thinking, and an executor of a locked plan does
-   not need a premium seat — while review and security ride `@slow`. Retargeting
-   a whole class of work is one step in `/model`.
-3. **Gate** — static validation (dependencies, acceptance, artifacts; in
-   allowlist mode, the model too). omp's own advisor reviews the dispatch once
-   the main model starts running it.
-4. **Emit** — one omp agent per role, prefixed `rf-`, with `tools`, `model`, and
-   `thinking-level` pinned. The prefix is not cosmetic: omp resolves agents by
-   name, and a project `scout.md` would silently replace the bundled scout with
-   this run's mission. Files land flat in `<repo>/.omp/agents/` (omp scans
-   `agents/*.md` at the top level only); the previous run's generated files are
-   pruned, hand-written agents are never touched, and task text never reaches
-   the frontmatter — only the body.
-5. **Dispatch** — the roles of one wave go out as a single parallel `task`
-   batch; the next wave waits for the previous one. Each batch item carries a
-   roster `name` (role + alias), so running agents are readable instead of omp's
-   random AdjectiveNoun defaults; the Agent Hub (`Alt+A`) shows each agent's
-   resolved model, status, and usage.
-
-## Specialist seats
-
-Beyond the base cast, two tiers cover shapes where a generic seat is the wrong
-worker:
-
-- **Library** (deterministic, zero model calls): a `designer` joins UI work on
-  `@designer` (not a stock omp role — add a `modelRoles.designer` entry, or the
-  seat falls back to your session model); a read-only `security-auditor` joins
-  security wording on `@slow`;
-  a `migration-runner` **replaces** the implementer for migrations — a migration
-  is implementation, and two writers on the same files is a defect, not a
-  feature. Audit-shaped tasks without build verbs drop the implementer and
-  tester so the auditor is never squeezed out by the role cap.
-- **Generated** (dynamic, validated): when the static cast is clearly thin for a
-  task, one cheap ephemeral model call proposes up to three specialist roles as
-  JSON. A proposal can never invent a model (aliases only), a tool outside the
-  grant list, a dependency that does not resolve, or a role count past the cap;
-  one invalid element discards the whole proposal, and any failure keeps the
-  static cast silently.
-
-## Review council
+Try it on something harmless first, with `--dry-run`, which plans without
+writing anything:
 
 ```text
-/role-fleet fix the auth bug --council        # or say "different providers"
+/role-fleet refactor the auth module across several files and review it --dry-run
 ```
 
-The single reviewer is replaced by N reviewers on distinct aliases — in a normal
-setup, distinct providers — reviewing the same change in one parallel wave, none
-of them seeing the others' reports. The dispatch prompt then requires the main
-model to read every review, surface agreements and disagreements explicitly, and
-adopt the most conservative finding as the verdict: a risk one reviewer saw is a
-risk, even if the others missed it. On analysis-only tasks the council does not
-wait for a reviewer that will never exist — its members join after the scout.
+You get back a plan — who would work on it, in which wave, on which model — and
+nothing is written to disk. Drop `--dry-run` when the plan looks right.
 
-The council is exempt from the role cap: `--max-roles 2 --council` still yields
-the scout plus the full council, because dropping reviewers to fit a budget
-would silently undo the review the user asked for.
+From then on it is one command:
 
-## The allowlist exception
-
-Pinning models is an exception, not the rule. One flag:
-
-```sh
-/role-fleet <task> --allowlist ~/my-fleet.json
-# or permanently: export ROLE_FLEET_ALLOWLIST=~/my-fleet.json
+```text
+/role-fleet fix the login bug
 ```
+
+The roles run as real background agents. Press `Alt+A` for the Agent Hub to watch
+them: each agent shows its resolved model, status, and token usage as it works.
+
+---
+
+## Flags
+
+| Flag | What it does |
+|---|---|
+| `--dry-run`, `-n` | Plan only. Writes nothing. |
+| `--council [N]` | Replace the single reviewer with N reviewers on different models. |
+| `--max-roles N` | Cap on generated roles (default 4, hard max 8). |
+| `--allowlist FILE` | Pin models to a file instead of using `@` aliases. |
+| `--specialist` | Force an extra model call to propose extra specialist roles. |
+
+Two of these are worth explaining, because they change the rules rather than the
+details.
+
+**`--allowlist FILE`** — by default each role takes a *model-role alias*
+(`@smol`, `@plan`, `@task`, `@slow`, `@vision`), and which concrete model stands
+behind `@slow` is decided by your `modelRoles` in `/model`. An allowlist replaces
+that indirection with an explicit list. Reach for it when you have a compliance
+requirement, when one specific model is clearly better for a class of work, or
+when you want to pin the fleet once and not think about it again:
 
 ```json
 {
@@ -149,35 +102,160 @@ Pinning models is an exception, not the rule. One flag:
 }
 ```
 
-That is the whole schema: `models` name concrete selectors (with optional
-`aliases`, and `enabled: false` to bench one), `roles` name a seat and the
-chain of models it may take, in preference order.
+That is the whole schema. `models` name concrete selectors (add `"enabled": false`
+to bench one); `roles` name a seat and the chain of models it may take, in
+preference order. Binding is **ordinal per seat**: the second reviewer in a
+council takes the second model in that seat's chain, not the first — otherwise
+"review with different providers" would quietly become three copies of one model.
 
-A seat the file describes takes its model from the seat's chain (the first
-enabled entry). A seat the file does not describe keeps its `@` alias and records
-a note saying so — the allowlist constrains the seats it lists; it is not a
-blanket guarantee that no unlisted model can run.
+A seat the file describes is pinned. A seat it does not describe keeps its `@`
+alias and the plan records a note saying so — the file constrains the seats it
+lists, it is not a blanket guarantee that no unlisted model can run.
+
+Set it once instead of passing the flag every time:
+
+```sh
+export ROLE_FLEET_ALLOWLIST=~/my-fleet.json
+```
+
+**`--specialist`** — the usual cast is chosen by static heuristics on your task
+text. When a task is unusual enough that the standard seats are clearly the wrong
+workers, this flag lets one cheap model call propose up to three additional roles.
+The proposal is sandboxed: it can only pick models and tools from fixed allowlists,
+cannot claim a reserved seat, and **one invalid element discards the whole
+proposal** rather than half-applying it. Any failure silently keeps the static
+cast. Without the flag the plugin still does this on its own when the static cast
+looks thin, or when your task text contains "specialist", "expert", or
+"consultant".
+
+---
+
+## Review council
+
+```text
+/role-fleet fix the auth bug --council
+```
+
+Or just say it — "view with different providers", "multi-model review" — and the
+council triggers on the wording.
+
+The single reviewer is replaced by N reviewers on **distinct models**, reviewing
+the same change in one parallel wave, none of them seeing the others' reports.
+That independence is the point: three reviewers on the same model tend to repeat
+the same blind spot three times.
+
+When the reports come back, the dispatch prompt requires the main model to read
+every one of them, state explicitly where they agree and where they disagree, and
+adopt the **most conservative** finding as the verdict — a risk one reviewer saw
+is a risk, even if the other two missed it.
+
+Two details that surprise people: the council ignores `--max-roles`, because
+dropping reviewers to fit a budget would silently undo the review you asked for;
+and on analysis-only tasks its members join after the scout rather than replacing
+a reviewer that was never going to exist.
+
+---
+
+## What actually happens
+
+```mermaid
+flowchart TD
+  A[task text] --> B[synthesize roles]
+  B --> C[bind each role to a<br/>model-role alias]
+  C --> D{static gate}
+  D -- fail --> X[refuse, report issues]
+  D -- pass --> E[write agent .md files<br/>into .omp/agents]
+  E --> F[wave 1 parallel] --> G[wave 2] --> H[...]
+```
+
+1. **Synthesize** — the shape of the task decides the cast: investigation,
+   planning (multi-file work only), implementation, tests, review, docs. A role
+   cap (default 4) bounds the fan-out; when it bites, the implementer is the last
+   role dropped.
+2. **Bind** — each role takes an alias: recon and test runs ride `@smol`
+   (mechanical work), planning rides `@plan`, implementation rides `@task` — the
+   planner already did the heavy thinking, and an executor of a locked plan does
+   not need a premium seat — while review and security ride `@slow`. Retargeting a
+   whole class of work is one step in `/model`.
+3. **Gate** — static validation of dependencies, acceptance criteria and artifacts
+   (in allowlist mode, the model too). A plan that does not hold up is refused
+   before any money is spent.
+4. **Emit** — one omp agent per role, prefixed `rf-`, with `tools`, `model` and
+   `thinking-level` pinned. The prefix is not cosmetic: omp resolves agents by
+   name, and a project `scout.md` would otherwise silently replace the bundled
+   scout with this run's mission. Files land flat in `<repo>/.omp/agents/` (omp
+   scans `agents/*.md` at the top level only). The previous run's generated files
+   are pruned; hand-written agents are never touched; and task text never reaches
+   the frontmatter — only the markdown body, so a task containing `---` cannot
+   break the definition.
+5. **Dispatch** — the roles of one wave go out as a single parallel `task` batch;
+   the next wave waits for the previous one. Each batch item carries a readable
+   roster `name` (role + alias) instead of omp's random `AdjectiveNoun` defaults.
+
+---
+
+## Specialist seats
+
+Beyond the base cast, two tiers cover shapes where a generic seat is the wrong
+worker.
+
+**Library** — deterministic, zero model calls. A `designer` joins UI work; a
+read-only `security-auditor` joins security wording on `@slow`; a
+`migration-runner` **replaces** the implementer for migrations, because a
+migration is implementation and two writers on the same files is a defect, not a
+feature. Audit-shaped tasks without build verbs drop the implementer and the
+tester, so the auditor is never squeezed out by the role cap.
+
+> The designer seat is pinned to `@designer`, which is **not** a stock omp role.
+> Add a `modelRoles.designer` entry in `/model`, or that seat falls back to
+> whatever model your session is already using.
+
+**Generated** — dynamic and validated. When the static cast is clearly thin for
+the task, one cheap ephemeral model call proposes up to three specialist roles as
+JSON. A proposal can never invent a model (aliases only), a tool outside the grant
+list, a dependency that does not resolve, or a role count past the cap; one
+invalid element discards the whole proposal, and any failure keeps the static
+cast silently.
+
+---
 
 ## The advisor
 
 oh-my-pi exposes no advisor API to extensions at all. The one touchpoint is the
 advisor's own `advise` tool calls, which arrive on `tool_call` with the identity
 `{kind:"sub", id:"advisor"}`. The plugin records those notes and shows them via
-`/role-fleet-advisor`; a blocker escalates immediately. The role-set decision is
-made before any money is spent (the static gate), and omp's own advisor reviews
-the dispatch itself.
+`/role-fleet-advisor`; a blocker escalates immediately.
+
+The role-set decision is made before any money is spent — that is the static gate
+— and omp's own advisor reviews the dispatch itself once the main model starts
+running it.
+
+---
+
+## Safety notes
+
+- **No secrets.** The package has zero runtime dependencies and the only host
+  import is type-only, so nothing from your environment is pulled in.
+- **Writes are scoped.** Generated agents land in `<repo>/.omp/agents/rf-*.md` and
+  nowhere else. Pruning only ever deletes files that carry this plugin's own
+  generated marker *and* whose frontmatter name matches their filename.
+- **Prune-safe.** A hand-written `agent.md`, or a generated one you renamed, is
+  never deleted.
+- **`role_fleet_plan` is `approval: "write"`**, because it does write files. Under
+  a read-only tool policy the host will prompt you.
+
+---
 
 ## Development
 
 ```sh
-npm test
+npm install
+npm test          # no provider, no session, no credentials needed
 npm run typecheck
 ```
 
-The tests need no provider, no session, and no credentials.
-
 Before publishing, `npm pack --dry-run` should list exactly `package.json`,
-`README.md`, `LICENSE`, and `src/**` — nothing else.
+`README.md`, `LICENSE` and `src/**` — nothing else.
 
 ## License
 

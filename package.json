@@ -1,5 +1,5 @@
 {
-  "name": "omp-role-fleet",
+  "name": "@supa-magic/omp-role-fleet",
   "version": "1.0.0",
   "description": "Split a task into agent roles and dispatch them in parallel waves — zero configuration",
   "author": "Andrei Bunulu <bunulu@gmail.com>",
@@ -12,13 +12,18 @@
     "url": "https://github.com/supa-magic/omp-role-fleet/issues"
   },
   "homepage": "https://github.com/supa-magic/omp-role-fleet#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "keywords": [
     "omp",
     "omp-plugin",
     "oh-my-pi",
+    "oh-my-pi-plugin",
     "subagents",
     "agents",
+    "multi-model",
     "model-allowlist",
     "orchestration"
   ],
