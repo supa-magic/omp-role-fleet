@@ -1,0 +1,9 @@
+node_modules/
+
+# Dogfood output: run dirs with plan artifacts, and the agent definitions a run
+# generated for itself. Both are per-machine, and both carry absolute paths.
+.role-fleet/
+.omp/agents/rf-*.md
+
+*.tgz
+.DS_Store

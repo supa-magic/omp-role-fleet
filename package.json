@@ -1,0 +1,47 @@
+{
+  "name": "omp-role-fleet",
+  "version": "1.0.0",
+  "description": "Split a task into agent roles and dispatch them in parallel waves — zero configuration",
+  "author": "Andrei Bunulu <bunulu@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supa-magic/omp-role-fleet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/supa-magic/omp-role-fleet/issues"
+  },
+  "homepage": "https://github.com/supa-magic/omp-role-fleet#readme",
+  "type": "module",
+  "keywords": [
+    "omp",
+    "omp-plugin",
+    "oh-my-pi",
+    "subagents",
+    "agents",
+    "model-allowlist",
+    "orchestration"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.10.4",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}
