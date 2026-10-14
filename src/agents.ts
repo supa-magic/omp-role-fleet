@@ -36,9 +36,16 @@ function runStamp(runId: string | undefined): string {
  */
 const AGENT_PREFIX = "rf-";
 
-/** YAML-safe scalar: quoted, with backslashes and quotes escaped. */
+/**
+ * YAML-safe scalar: quoted, with backslashes and quotes escaped.
+ *
+ * Newlines collapse to a space: a value carrying one would close the scalar and
+ * let the rest of it inject arbitrary frontmatter keys. The only frontmatter
+ * value that can come from outside this file is `model`, selected from the
+ * user's own allowlist, so this is defence in depth rather than a live hole.
+ */
 function yamlString(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ")}"`;
 }
 
 /**
@@ -61,10 +68,12 @@ function frontmatter(role: RoleSpec): string {
   // Library seats carry their own copy, and a council member is the reviewer
   // seat with a number on it — without these two steps every generated seat
   // shipped the same placeholder and was indistinguishable in the agent picker.
+  // Own properties only: a generated id such as `constructor` passes the id
+  // regex and would otherwise resolve to an inherited Function, not a string.
   const description =
-    SEAT_DESCRIPTION[role.id] ??
-    SPECIALIST_DESCRIPTIONS[role.id] ??
-    SEAT_DESCRIPTION[role.core] ??
+    (Object.hasOwn(SEAT_DESCRIPTION, role.id) ? SEAT_DESCRIPTION[role.id] : undefined) ??
+    (Object.hasOwn(SPECIALIST_DESCRIPTIONS, role.id) ? SPECIALIST_DESCRIPTIONS[role.id] : undefined) ??
+    (Object.hasOwn(SEAT_DESCRIPTION, role.core) ? SEAT_DESCRIPTION[role.core] : undefined) ??
     "Role-fleet generated seat.";
   return [
     "---",

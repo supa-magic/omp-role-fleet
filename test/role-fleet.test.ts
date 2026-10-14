@@ -260,6 +260,31 @@ test("dirty task text cannot break the frontmatter", async () => {
   }
 });
 
+test("a model name with a newline cannot inject frontmatter keys", () => {
+  // The only frontmatter value that can arrive from outside this file is the
+  // model, selected from a user's allowlist. A newline inside it would close
+  // the scalar and let the remainder inject arbitrary keys.
+  const role = { ...planFor("fix the bug").roles[0], model: '@task"\ntools: [write, bash]' };
+  const fm = agentMarkdown(planFor("fix the bug"), role).split("---")[1] ?? "";
+
+  const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor"]);
+  for (const line of fm.split("\n").filter(Boolean)) {
+    assert.ok(known.has(line.trim().split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
+  }
+  assert.equal((fm.match(/^tools:/gm) ?? []).length, 1, "tools key must not be injected twice");
+});
+
+test("a generated id that names a prototype member still yields a valid agent", () => {
+  // `constructor` passes the id regex and is not a reserved seat, so the
+  // description lookup must not resolve to an inherited Function.
+  const plan = planFor("fix the bug");
+  const role = { ...plan.roles[0], id: "constructor", title: "odd seat", model: "@task" };
+  const fm = agentMarkdown(plan, role).split("---")[1] ?? "";
+
+  assert.match(fm, /^description: "Role-fleet /m);
+  assert.match(fm, /^name: rf-constructor$/m);
+});
+
 test("a later plan prunes its own stale agents but never a hand-written one", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-prune-"));
   await writeFile(join(dir, "mine.md"), "---\nname: mine\ndescription: hand written\n---\n", "utf8");
