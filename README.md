@@ -74,12 +74,17 @@ them: each agent shows its resolved model, status, and token usage as it works.
 | Flag | What it does |
 |---|---|
 | `--dry-run`, `-n` | Plan only. Writes nothing. |
-| `--council [N]` | Replace the single reviewer with N reviewers on different models. |
-| `--models (a,b,c)` | Run the review seats on exactly these models, in this order. |
+| `--council [N]` | Replace the single reviewer with N reviewers on different models (max 3). |
+| `--models (a,b,c)` | Run the review seats on exactly these models, in this order (max 5). |
 | `--consul MODEL` | Model that reconciles the council's reports. Default: your session model. |
 | `--review-only` | Scout and review seats only. No seat can edit the code. |
 | `--max-roles N` | Cap on generated roles (default 4, hard max 8). |
 | `--allowlist FILE` | Pin models to a file instead of using `@` aliases. A leading `~` is expanded. |
+
+A value past a flag's ceiling is clamped to it, never dropped, and the clamp is
+reported in the plan's notes rather than applied silently. A non-numeric value is
+refused the same way, and the word stays in the task text instead of being
+swallowed as a bogus number.
 
 Two of these are worth explaining, because they change the rules rather than the
 details.

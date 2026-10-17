@@ -606,7 +606,7 @@ test("a proposed writer cannot enter an analysis-only plan", async () => {
 
 test("a build plan still accepts a proposed writer", async () => {
   // The counterpart, so the guard above is an intent rule and not a blanket ban:
-  // with an implementer in the cast, a proposed writer is allowed.
+  // with a writer in the cast, a proposed writer is allowed.
   const dir = await mkdtemp(join(tmpdir(), "rf-propok-"));
   const result = await runRoleFleet({
     task: "fix the auth bug and add a regression test, bring in a consultant",
@@ -623,6 +623,77 @@ test("a build plan still accepts a proposed writer", async () => {
     result.plan!.roles.some((r) => r.id === "crypto-hander"),
     `a legitimate proposed writer was refused: ${result.plan!.notes.join(" | ")}`,
   );
+});
+
+test("a writer under a non-implementer id is not mistaken for an analysis-only plan", async () => {
+  // The pipeline used to answer "does this plan hold a writer?" by testing for
+  // the id `implementer`. A migration task replaces that seat with
+  // `migration-runner` and a UI task mints `designer` — both hold `edit` — so
+  // the plan shipped a writer while the tier called it analysis-only and
+  // refused a proposed writer for a reason that did not hold. The task text in
+  // the test above cannot catch this: its writer really is named `implementer`,
+  // so both the broken and the fixed pipeline accept the proposal.
+  for (const [label, task, writerId] of [
+    ["migration", "migrate the codebase from jest to vitest and fix the fallout", "migration-runner"],
+    ["ui", "build a landing page with a pricing section", "designer"],
+  ] as const) {
+    const dir = await mkdtemp(join(tmpdir(), `rf-writerid-${label}-`));
+    const result = await runRoleFleet({
+      task: `${task} with a specialist expert`,
+      cwd: dir,
+      dryRun: true,
+      maxRoles: 8,
+      propose: async () =>
+        JSON.stringify([
+          { id: "extra-tuner", title: "T", mission: "Tune the config", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
+        ]),
+    });
+    assert.equal(result.ok, true);
+    assert.ok(
+      result.plan!.roles.some((r) => r.id === writerId),
+      `${label}: the plan lost its writer; cast is ${result.plan!.roles.map((r) => r.id).join(",")}`,
+    );
+    assert.ok(
+      result.plan!.roles.some((r) => r.id === "extra-tuner"),
+      `${label}: a plan holding ${writerId} refused a proposed writer: ${result.plan!.notes.join(" | ")}`,
+    );
+    assert.ok(
+      !result.plan!.notes.some((n) => n.includes("analysis-only") && n.includes("extra-tuner")),
+      `${label}: reported analysis-only for a cast that writes: ${result.plan!.notes.join(" | ")}`,
+    );
+  }
+});
+
+test("the merge re-applies the role cap to what it adds", async () => {
+  // The cap is a fan-out control, not a per-tier one: `synthesizePlan` trims the
+  // static cast, and without re-applying it here a task that triggers the
+  // proposal tier would ship a static cast plus every proposal on top of it.
+  // The branch runs in ordinary use and had no assertion at all.
+  //
+  // The cap has to leave a slot open for the truncation itself to be the thing
+  // under test. A build task fills the cap with its static cast, so both
+  // proposals are dropped and the count assertion passes for the wrong reason.
+  // This review-shaped task casts 3 seats under a cap of 4, so exactly one
+  // proposal fits and the second is the one the cap must remove.
+  const dir = await mkdtemp(join(tmpdir(), "rf-mergecap-"));
+  const result = await runRoleFleet({
+    task: "review the auth module for injection risks, consult a specialist expert",
+    cwd: dir,
+    dryRun: true,
+    maxRoles: 4,
+    propose: async () =>
+      JSON.stringify([
+        { id: "tuner-a", title: "A", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+        { id: "tuner-b", title: "B", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  const cast = ids(result.plan!);
+  assert.equal(cast.length, 4, `cap 4 not re-applied to the merged cast: ${cast.join(",")}`);
+  assert.ok(cast.includes("tuner-a"), `the proposal inside the cap must survive: ${cast.join(",")}`);
+  assert.ok(!cast.includes("tuner-b"), `a proposal past the cap must be dropped: ${cast.join(",")}`);
+  const dropped = result.plan!.notes.find((n) => n.startsWith("role cap 4") && n.includes("tuner-b"));
+  assert.ok(dropped, `the drop must be reported by id, not silent: ${result.plan!.notes.join(" | ")}`);
 });
 
 test("--review-only on a capable host does not claim the tier is missing", async () => {

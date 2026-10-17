@@ -196,10 +196,16 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // out, and a proposed writer in a plan that must not write is the exact hole
   // `applySpecialists` now closes for the static tier.
   //
-  // Whether the cast holds a writer is read once, here, for both branches: the
+  // The static tier already decided whether this task asks for analysis or for
+  // changes, and it decided it structurally — from the flags and the task
+  // shape, not from which seats survived. Reading that verdict off the plan
+  // instead of re-deriving it here is the whole point: a cast can hold a writer
+  // under an id that is not `implementer` (`migration-runner`, `designer`), and
+  // an id test called those plans analysis-only, refusing proposed writers in a
+  // run that shipped one. The flag is read once here for both branches: the
   // merge below can strip roles, so recomputing it further down would answer a
   // different question than the one the merge was asked.
-  const analysisOnly = !plan.roles.some((r) => r.id === "implementer");
+  const analysisOnly = plan.analysisOnly ?? false;
   if (opts.propose && !opts.reviewOnly) {
     if (shouldPropose(opts.task, analysisOnly)) {
       const proposed = await proposeSpecialists(opts.task, opts.propose);

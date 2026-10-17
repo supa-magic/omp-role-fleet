@@ -160,6 +160,19 @@ export interface RolePlan {
   notes: string[];
   /** Which run produced this plan; emitted into agent files for prune scoping. */
   runId?: string;
+  /**
+   * The task asked to look, not to change — so no seat may gain write access.
+   *
+   * Set by `synthesizePlan` from the structural intent it already computes, and
+   * read by the pipeline to gate the dynamic tier. It is carried on the plan
+   * rather than recomputed there because "does this cast hold a writer" is not
+   * the same question: `migration-runner` and `designer` write under ids that
+   * are not `implementer`, so an id test called a plan that ships a writer
+   * analysis-only and refused proposed writers for a reason that did not hold.
+   * Optional only so a hand-built plan literal typechecks; a real plan always
+   * carries it.
+   */
+  analysisOnly?: boolean;
 }
 
 /** The gate is binary by design: a plan either ships as-is or is refused with

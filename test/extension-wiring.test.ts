@@ -691,6 +691,26 @@ test("a non-numeric flag is reported instead of silently becoming NaN", () => {
   assert.deepEqual(good.problems, []);
 });
 
+test("a trailing valueless flag names the missing value, not an empty string", () => {
+  // `--max-roles` as the last word has no value at all. Reporting it through the
+  // numeric path printed `(got "")` — quoting an argument the user never typed
+  // and sending them hunting for one they had already decided not to write —
+  // and it said so twice for a single flag.
+  const trailing = parseFlags(["fix the bug", "--max-roles"]);
+  assert.equal(trailing.flags.maxRoles, undefined);
+  assert.equal(trailing.problems.length, 1, `one flag, one problem: ${trailing.problems.join(" | ")}`);
+  assert.match(trailing.problems[0]!, /--max-roles needs a positive whole number/);
+  assert.ok(!trailing.problems[0]!.includes('""'), `must not quote an empty string: ${trailing.problems[0]}`);
+  assert.equal(trailing.task, "fix the bug");
+
+  // A word after the flag is named verbatim, and stays task text — the other
+  // half of the same rule.
+  const follower = parseFlags(["--max-roles", "zero", "fix the bug"]);
+  assert.equal(follower.problems.length, 1, `one flag, one problem: ${follower.problems.join(" | ")}`);
+  assert.match(follower.problems[0]!, /got "zero"/);
+  assert.equal(follower.task, "zero fix the bug");
+});
+
 test("flag values are consumed, not left to contaminate the task text", () => {
   // `--council 5` used to leave `5` in the task, and the task lands in every
   // emitted agent body and in the keyword heuristics.

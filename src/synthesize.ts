@@ -396,9 +396,15 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
   // reviewer), so the cap never trades them away — dropping two of three
   // reviewers is not a smaller council, it is a broken one, and a dropped consul
   // would silently hand synthesis back to the session model.
+  // Exempt on `core`, not on the id: `migration-runner` runs the implementer
+  // seat under its own id. Today the two cannot disagree — a migration writer
+  // replaces the implementer in place, so it always lands inside the kept
+  // prefix, and the slice below never sees it — but the id test was correct only
+  // by accident of that insertion order. Keying on the seat that carries the
+  // authority is what makes it correct by construction; the cost is one word.
   const overflow = drafted
     .slice(maxRoles)
-    .filter((r) => r.id !== "implementer" && r.id !== "consul" && !isCouncilMember(r.id));
+    .filter((r) => r.core !== "implementer" && r.core !== "consul" && !isCouncilMember(r.id));
   const roles = overflow.length ? drafted.filter((r) => !overflow.includes(r)) : drafted;
   if (overflow.length) notes.push(`role cap ${maxRoles}: dropped ${overflow.map((r) => r.id).join(", ")}`);
   // The exempt roles are kept on purpose, but "kept on purpose" is not the same
@@ -408,7 +414,10 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
     notes.push(`role cap ${maxRoles} exceeded: ${roles.length} roles (council and implementer are exempt)`);
   }
 
-  return { task, cwd, roles, notes };
+  // The structural intent travels with the plan so the pipeline gates the
+  // dynamic tier on the same flag the static tier used, instead of asking the
+  // shape of the finished cast a question the flags already answered.
+  return { task, cwd, roles, notes, analysisOnly: analysisIntent };
 }
 
 export interface ProposalMergeOptions {

@@ -22,7 +22,7 @@ import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpec
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.3.4";
+const PLUGIN_VERSION = "1.3.5";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -184,7 +184,10 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
         // stays task text rather than being swallowed as a bogus cap.
         problems.push(`--max-roles needs a positive whole number, got "${follower}" — keeping the default, treating it as task text`);
       } else {
-        flags.maxRoles = numeric(value, "--max-roles", MAX_ROLES);
+        // Trailing flag, nothing after it. `numeric` would report `(got "")` —
+        // naming an empty string the user never typed — and the missing value
+        // is the whole story, so it is said once, in the words that fit.
+        problems.push("--max-roles needs a positive whole number, ignoring it");
       }
     } else if (word.startsWith("--max-roles=")) flags.maxRoles = numeric(word.slice("--max-roles=".length), "--max-roles", MAX_ROLES);
     else if (word === "--review-only") flags.reviewOnly = true;
