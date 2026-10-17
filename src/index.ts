@@ -22,7 +22,7 @@ import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpec
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.3.5";
+const PLUGIN_VERSION = "1.3.6";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -212,10 +212,35 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
     else if (word === "--models" || word.startsWith("--models=")) {
       const inline = word.startsWith("--models=") ? word.slice("--models=".length) : undefined;
       if (inline !== undefined) {
-        // One word carries the value, so there is nothing to consume and
-        // nothing to guess — parentheses optional here, purely for muscle
-        // memory with the spaced form.
-        flags.models = parseModelList(inline, problems);
+        // One word usually carries the value, so there is nothing to consume and
+        // nothing to guess — parentheses optional here, purely for muscle memory
+        // with the spaced form. But the host splits on whitespace, so
+        // `--models=(a, b)` arrives as `--models=(a,` and `b)`: a value that
+        // opens a bracket it does not close finishes in the words after it.
+        // Read the rest only while the bracket is open — a value with an extra
+        // `)` is malformed whatever follows, and `parseModelList` is the one that
+        // reports it by name.
+        let text = inline;
+        let depth = 0;
+        for (const ch of inline) {
+          if (ch === "(") depth++;
+          else if (ch === ")") depth--;
+        }
+        let next = i;
+        while (depth > 0 && next + 1 < words.length) {
+          const candidate = words[next + 1]!;
+          for (const ch of candidate) {
+            if (ch === "(") depth++;
+            else if (ch === ")") depth--;
+          }
+          text += ` ${candidate}`;
+          next++;
+        }
+        // A bracket still open after every remaining word was read is a list cut
+        // short, not one the host split: the value is the single word, and
+        // refusing it beats pinning `(a` as a selector that cannot exist.
+        if (depth === 0 && next > i) i = next;
+        flags.models = parseModelList(depth === 0 ? text : inline, problems);
       } else {
         // The list is read across words until the brackets balance, because
         // the host splits the command line on whitespace: `--models (a, b, c)`
@@ -273,8 +298,12 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
       // the host cannot resolve — the seat then ran on the parent's model while
       // the plan claimed a provider it never had. A bare name like `sonnet` is
       // indistinguishable from task text here, so it goes in the `=` form, where
-      // the user separated the value themselves.
-      const isModelShape = candidate !== undefined && /^(@[\w][\w.-]*|[\w][\w.-]*\/[\w][\w.:-]*)$/.test(candidate);
+      // the user separated the value themselves. Paths nest — a router selector
+      // is `openrouter/anthropic/claude-4`, three segments — so the shape is one
+      // or more `/segment`s after the provider, not exactly one: the spaced form
+      // used to refuse the spelling the `=` form accepted, which made the same
+      // selector work or fail depending on how it was typed.
+      const isModelShape = candidate !== undefined && /^(@[\w][\w.-]*|[\w][\w.-]*(?:\/[\w][\w.:-]*)+)$/.test(candidate);
       if (candidate && (isModelShape || inline !== undefined)) {
         if (inline === undefined) i++;
         flags.consul = candidate;
@@ -328,23 +357,17 @@ function runOptions(input: Flags & { task: string; cwd: string }, ctx: Extension
   };
 }
 
-/** Session-shaped prompt handed to the main model once the gate approves. */
+/**
+ * Session-shaped prompt handed to the main model once the gate approves.
+ *
+ * The dispatch instructions themselves live in `renderDispatch`, which both
+ * surfaces render: keeping a second copy here is how the tool path came to
+ * depend on the model noticing a rule the command path stated.
+ */
 function dispatchPrompt(task: string, result: RunResult): string {
-  return [
-    `Role-fleet plan approved.`,
-    ``,
-    `User task: ${task}`,
-    ``,
-    renderDispatch(result.groups, result.agentDir ?? ""),
-    ``,
-    `Every agent above already exists as an omp agent definition whose model, tool`,
-    `grant, and thinking level are pinned in its file. Dispatch each wave with the`,
-    `task tool as a single batch, then wait for that wave before starting the next.`,
-    `Pass each item's name and agent exactly as given, plus the task text. Do NOT`,
-    `set model, tools, or effort on the task call — the task tool has no model`,
-    `field (the definition pins it), treats a tools field as eval-defined tools,`,
-    `and overriding the agent's own grant is what the definitions exist to prevent.`,
-  ].join("\n");
+  return [`Role-fleet plan approved.`, ``, `User task: ${task}`, ``, renderDispatch(result.groups, result.agentDir ?? "")].join(
+    "\n",
+  );
 }
 
 /**
@@ -645,7 +668,10 @@ export default function roleFleet(pi: ExtensionAPI): void {
       // "Extension command error". The user only ever sees an actionable message.
       try {
         const words = args.trim().split(/\s+/).filter(Boolean);
-        if (words[0] === "--version" || words[0] === "version") {
+        // The word alone, never as the first word of a task: "version the api
+        // endpoints" is work to plan, and reading it as the version subcommand
+        // made that task unplannable with no way to say so.
+        if (words.length === 1 && (words[0] === "--version" || words[0] === "version")) {
           ctx.ui.notify(`omp-role-fleet ${PLUGIN_VERSION}`, "info");
           return;
         }

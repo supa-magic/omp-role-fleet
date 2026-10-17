@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { castPresets, filterToSeats, seatRows } from "../src/confirm.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
-import { planWaves } from "../src/core.ts";
+import { isCouncilMember, planWaves } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 
 function planFor(task: string, extra: Record<string, unknown> = {}) {
@@ -66,6 +66,34 @@ test("the council preset keeps the first member and drops the rest", () => {
   // And the preview names the reviewer that stayed.
   assert.match(preset.preview, /Reviewer 1 — reviews the change/);
   assert.ok(!preset.preview.includes("Reviewer 2"), `a dropped member still listed: ${preset.preview}`);
+});
+
+test("the single-reviewer preset counts the council in front of it", () => {
+  // A named list seats two to five members, so the copy has to count the review
+  // the user is looking at instead of asserting the default three: a two-model
+  // council was offered "One reviewer instead of three".
+  const two = planFor("review the auth module", { council: 2 });
+  assert.equal(two.roles.filter((r) => isCouncilMember(r.id)).length, 2, "fixture must seat a council of two");
+  const preset = castPresets(two).find((p) => p.id === "single-reviewer")!;
+  assert.match(preset.label, /instead of two/);
+  assert.match(preset.description, /one opinion instead of two/i);
+});
+
+test("a catalog seat is described by its own purpose, not its core's", () => {
+  // `migration-runner` executes the implementer seat under its own id, and the
+  // purpose lookup fell through id → core, so the checklist and the roster told
+  // the user the migration seat "implements the plan with the smallest correct
+  // change" — the implementer's sentence, on the one screen whose job is to say
+  // what each seat does.
+  const plan = planFor("migrate the api client to the new sdk and fix the tests");
+  const rows = seatRows(plan, planWaves(plan.roles));
+  const runner = rows.find((r) => r.id === "migration-runner")!;
+  assert.match(runner.description, /migration/);
+  assert.ok(!/smallest correct change/.test(runner.description), runner.description);
+  assert.match(
+    castPresets(plan).find((p) => p.id === "as-planned")!.preview,
+    /Migration runner — runs a dependency or framework migration/,
+  );
 });
 
 test("every seat row names its model and whether it writes", () => {

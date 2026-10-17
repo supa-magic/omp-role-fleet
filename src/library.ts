@@ -15,16 +15,12 @@ export interface Specialist {
   match: RegExp;
   /** Replaces the implementer instead of adding a role (migration case). */
   replacesImplementer?: boolean;
-  /** Static description for the emitted agent's frontmatter. */
-  description: string;
   spec: Omit<RoleSpec, "dependsOn" | "artifact"> & { dependsOn?: string[] };
 }
 
 export const SPECIALISTS: Specialist[] = [
   {
     match: /\b(landing|ui|ux|design|mockup|wireframe|layout|frontend page|web page)\b/i,
-    description:
-      "Role-fleet designer: implement/refine the interface with accessibility and visual quality. Write access.",
     spec: {
       id: "designer",
       title: "Designer",
@@ -47,8 +43,6 @@ export const SPECIALISTS: Specialist[] = [
   },
   {
     match: /\b(security|vulnerab|pentest|injection|xss|csrf|exploit|threat model)\b/i,
-    description:
-      "Role-fleet security auditor: read-only vulnerability discovery over the target surface, with evidence.",
     spec: {
       id: "security-auditor",
       title: "Security auditor",
@@ -70,8 +64,6 @@ export const SPECIALISTS: Specialist[] = [
   {
     match: /\b(migrat\w*|port from|upgrade (the )?(deps|dependencies|framework)|move off)\b/i,
     replacesImplementer: true,
-    description:
-      "Role-fleet migration runner: execute a dependency/framework migration in ordered, verifiable steps.",
     spec: {
       id: "migration-runner",
       title: "Migration runner",
@@ -120,7 +112,17 @@ export function applySpecialists(
         notes.push(`${specialist.spec.id}: task has no implementer to replace; skipped`);
         continue;
       }
-      next.splice(index, 1, toRole(specialist, workDir, has));
+      // The specialist stands in for the implementer, so it waits on what the
+      // implementer would have waited on — the plan when there is one, the scout
+      // otherwise — instead of on the catalog entry's own edge. A migration was
+      // otherwise dispatched beside the planner that was written for it: the plan
+      // nobody read looked exactly like a plan that was followed.
+      const replaced = next[index]!;
+      const inherited = replaced.dependsOn ?? [];
+      next.splice(index, 1, {
+        ...toRole(specialist, workDir, has),
+        ...(inherited.length ? { dependsOn: [...inherited] } : {}),
+      });
       // The tester, reviewer and docs updater still point at "implementer".
       // They now wait on the specialist that stands in for it — leaving the
       // removed id behind would fail validation for the whole plan.
@@ -157,8 +159,3 @@ function toRole(specialist: Specialist, workDir: string, has: (id: string) => bo
   const { dependsOn: _dropped, ...rest } = specialist.spec;
   return { ...rest, dependsOn: depends, artifact: `${workDir}/${specialist.spec.id}.md` };
 }
-
-/** Static frontmatter descriptions for library seats (see agents.ts). */
-export const SPECIALIST_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
-  SPECIALISTS.map((s) => [s.spec.id, s.description]),
-);

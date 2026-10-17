@@ -160,6 +160,59 @@ test("a migration with no implementer to replace is skipped with a note", () => 
   assert.ok(plan.notes.some((n) => n.includes("migration-runner")));
 });
 
+test("a migration that names no code vocabulary still gets the runner", () => {
+  // The runner is the one catalog seat that stands in for the implementer, and
+  // the tasks it exists for — "migrate off lodash", "upgrade the deps", "move
+  // off webpack" — carry none of `CODE_HINT`'s words. So no implementer was
+  // drafted, the replacement had nothing to replace, and the run shipped a scout
+  // plus a reviewer whose mission was to review a change nobody made, while the
+  // README promises the replacement. The shape is read off the catalog's own
+  // pattern, so the seat that replaces the implementer is the one that decides.
+  for (const task of [
+    "migrate off lodash across several files",
+    "upgrade the dependencies to the latest majors",
+    "move off webpack to vite",
+    // Words that look like research but name the subject of a migration:
+    // rejecting the shape on `version`/`upstream` would re-create the
+    // writer-less cast this rule exists to prevent. Both hit the catalog's own
+    // migration pattern, so the veto is what decides them.
+    "upgrade the framework to the latest version",
+    "move off the vendored upstream fork",
+  ]) {
+    const plan = basePlan(task);
+    assert.ok(ids(plan).includes("migration-runner"), `${task}: cast is ${ids(plan).join(",")}`);
+    assert.ok(!ids(plan).includes("implementer"), `${task}: two writers on the same files`);
+    assert.ok(plan.roles.find((r) => r.id === "migration-runner")!.tools.includes("edit"));
+  }
+
+  // A task phrased as an investigation is not one: the veto is a look verb, on
+  // its own or alongside any wording the plan already reads as analysis.
+  for (const task of [
+    "research migration options for the upgrade path",
+    "audit the migration plan before we migrate",
+    "compare lodash and ramda before moving the codebase off lodash",
+  ]) {
+    assert.ok(!ids(basePlan(task)).includes("migration-runner"), `${task}: a look minted a writer`);
+  }
+});
+
+test("the migration runner waits on the plan that was written for it", () => {
+  // The catalog entry depends on the scout, and the implementer it replaces
+  // depends on the planner — so taking the catalog's edge dispatched the
+  // migration beside the plan written for it, in the same wave: the plan nobody
+  // read looked exactly like a plan that was followed.
+  const plan = basePlan("migrate the api client off the old sdk across several files");
+  const runner = plan.roles.find((r) => r.id === "migration-runner")!;
+  assert.ok(ids(plan).includes("planner"), `fixture lost the planner: ${ids(plan).join(",")}`);
+  assert.deepEqual(runner.dependsOn, ["planner"]);
+
+  const waves = planWaves(plan.roles).map((w) => w.map((r) => r.id));
+  assert.ok(
+    waves.findIndex((w) => w.includes("migration-runner")) > waves.findIndex((w) => w.includes("planner")),
+    `the runner must wait for its plan: ${JSON.stringify(waves)}`,
+  );
+});
+
 test("plain engineering work gets no specialists", () => {
   const plan = basePlan("fix the off-by-one in the pagination helper");
   const specialistIds = new Set(SPECIALISTS.map((s) => s.spec.id));

@@ -76,6 +76,14 @@ const modifiesSource = (r: RoleSpec): boolean => r.tools.includes("edit");
  */
 const writesRepoWide = (r: RoleSpec): boolean => r.tools.includes("write") && !r.tools.includes("edit");
 const councilMembers = (plan: RolePlan): RoleSpec[] => plan.roles.filter((r) => isCouncilMember(r.id));
+/**
+ * Council size → the word the preset's copy uses.
+ *
+ * A named list can seat two to five members, so the sentence has to count the
+ * council in front of the reader instead of asserting the default three. Every
+ * size the parser can produce is here; anything else falls back to the digit.
+ */
+const COUNCIL_WORD: Record<number, string> = { 1: "one", 2: "two", 3: "three", 4: "four", 5: "five" };
 
 /**
  * What a seat is called to the person choosing it.
@@ -247,13 +255,18 @@ export function castPresets(plan: RolePlan): Preset[] {
   const council = councilMembers(plan);
   if (council.length > 1) {
     const others = plan.roles.filter((r) => !isCouncilMember(r.id));
+    // The copy counts the council that is actually seated: a two-model list runs
+    // a council of two and a named list can run five, and "instead of three"
+    // described a review nobody was looking at. Spelled out rather than printed
+    // as a digit because this is prose on a consent screen.
+    const size = COUNCIL_WORD[council.length] ?? String(council.length);
     presets.push(
       preset(
         "single-reviewer",
-        "One reviewer instead of three",
+        `One reviewer instead of ${size}`,
         [...seatIds(others), council[0]!.id],
         (_kept, lost) =>
-          `One opinion instead of three — a third of the review cost. Drops ${council
+          `One opinion instead of ${size} — the review cost drops to a single run. Drops ${council
             .slice(1)
             .map(seatLabel)
             .join(", ")}.` + lostClause(lost),

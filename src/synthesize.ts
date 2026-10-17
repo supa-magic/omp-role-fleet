@@ -7,7 +7,7 @@
  */
 import { join } from "node:path";
 import type { Capability, Effort, RolePlan, RoleSpec } from "./core.ts";
-import { applySpecialists } from "./library.ts";
+import { applySpecialists, SPECIALISTS } from "./library.ts";
 import { aliasFor, CAPABILITY_ID, DEFAULT_MAX_ROLES, isCouncilMember, READ_TOOLS, WRITE_TOOLS } from "./core.ts";
 
 const CODE_HINT = /\b(code|bug|fix|refactor|implement|function|test|api|module|crate|rust|typescript|python)\b/i;
@@ -16,6 +16,21 @@ const REVIEW_HINT = /\b(review|audit|security|check|verify|vulnerab)/i;
 const MULTI_FILE_HINT = /\b(refactor|migrat|across|several files|multi-file|suite|whole repo)\b/i;
 const IMAGE_HINT = /\b(screenshot|image|ui|ux|design|visual|layout|render)\b/i;
 const DOCS_HINT = /\b(document|readme|changelog)\b/i;
+
+/**
+ * Wording that asks for a look rather than a change.
+ *
+ * Used for the one decision no other hint can answer: whether a matching
+ * migration specialist means "this task is implementation". `RESEARCH_HINT` is
+ * not reusable here even though it is the existing "finding out" vocabulary —
+ * its noun members name a *subject* as often as a task, and "upgrade the library
+ * to the latest version" or "move the vendored upstream code off X" are
+ * migrations that `library`, `version`, and `upstream` would veto, re-creating
+ * the writer-less cast this exists to prevent. What vetoes is an investigation
+ * verb, on its own or alongside the analysis wording the plan already reads.
+ */
+const INVESTIGATE_HINT =
+  /\b(research|investigate|compare|evaluate|survey|explore|analys\w*|assess|audit|review|inspect|verify|check)\b/i;
 
 /** Drop order when the cap bites: implementation is never dropped first. */
 const KEEP_PRIORITY: Record<Capability, number> = {
@@ -82,7 +97,19 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
   const maxRoles = opts.maxRoles ?? DEFAULT_MAX_ROLES;
   const notes: string[] = [];
 
-  const wantsCode = CODE_HINT.test(task);
+  // A migration that names no code vocabulary is still a change: see the seat
+  // that stands in for the implementer (`SPECIALISTS`), whose own pattern —
+  // "migrate off lodash", "upgrade the deps", "move off webpack" — carries none
+  // of `CODE_HINT`'s words. Reading the shape off that pattern is what keeps the
+  // README's promise ("a migration is implementation, so the runner replaces the
+  // implementer"); without it the specialist is skipped for want of an
+  // implementer to replace, and a task that asked to change the tree ships a
+  // scout and a reviewer that reviews nothing. A task phrased as an investigation
+  // vetoes it — "research migration options" is a look at a migration, not a
+  // migration, and it must not mint a writer.
+  const wantsCode =
+    CODE_HINT.test(task) ||
+    (SPECIALISTS.some((s) => s.replacesImplementer && s.match.test(task)) && !INVESTIGATE_HINT.test(task));
   const wantsPlan = wantsCode && MULTI_FILE_HINT.test(task);
   const wantsReview = REVIEW_HINT.test(task) || MULTI_FILE_HINT.test(task) || wantsCode;
   const needsVision = IMAGE_HINT.test(task);
@@ -168,7 +195,13 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
       review: {
         id,
         title: "Reviewer",
-        mission: "Review the delivered change for correctness, scope, and evidence. Read-only.",
+        // No authority claim in the mission: the grant decides it, and one seat
+        // holds two grants across two runs — a council member gains repo-wide
+        // `write` when a consul is appointed so its report reaches the
+        // filesystem. The frontmatter's grant note and the brief's `## Upstream
+        // artifacts` line say what this seat may write, from `role.tools`, so a
+        // second copy here is correct only until the consul block runs.
+        mission: "Review the delivered change for correctness, scope, and evidence.",
         acceptance: ["Findings with file:line or explicit verdict", "No files modified"],
         dependsOn: dep(CAPABILITY_ID.code),
         tools: READ_TOOLS,

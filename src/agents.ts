@@ -16,8 +16,6 @@ import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec } from "./core.ts";
 import { AGENT_PREFIX, SEAT_PURPOSE, planWaves } from "./core.ts";
 
-import { SPECIALIST_DESCRIPTIONS } from "./library.ts";
-
 /**
  * Ordering for run ids, in one place.
  *
@@ -104,34 +102,51 @@ function grantNote(tools: string[]): string {
  * the brief's pinned selector — which a fallback invalidates exactly when it
  * matters. The real answer is host-side (`model-observed.ts`) and is recorded
  * from the settled result rather than asked for.
+ * Every field carries a `description` and every field is listed in `required`,
+ * because the two formats the host accepts read the same YAML differently. A
+ * root with `properties` and no `type` parses as JTD, whose `properties` are
+ * required members — but the conversion rebuilds each node from JTD keywords
+ * alone and drops `metadata`, so the descriptions never reach the model. Naming
+ * `type: object` and `required` takes the JSON-Schema branch instead, where both
+ * survive; leaving `required` out of *that* branch would require nothing at all,
+ * which is the anti-summary guarantee this schema exists for.
  */
 const REPORT_SCHEMA_YAML = [
   "output:",
+  "  type: object",
   "  properties:",
   "    summary:",
   "      type: string",
-  "      metadata:",
-  '        description: "One-paragraph headline of the outcome. Never the deliverable itself."',
+  '      description: "One-paragraph headline of the outcome. Never the deliverable itself."',
   "    report:",
   "      type: string",
-  "      metadata:",
-  '        description: "The complete deliverable at full depth: every finding with file:line evidence,',
-  '          per-item detail, tables, and the checks actually run with their real output."',
+  // Presence is not delivery: the required list rejects a yield that omits the
+  // field, and this rejects one that satisfies it with an empty string — the
+  // same non-answer in a different shape. The host's validator enforces it
+  // ("must be at least 1 characters") and the keyword survives normalization.
+  "      minLength: 1",
+  '      description: "The complete deliverable at full depth: every finding with file:line evidence,',
+  '        per-item detail, tables, and the checks actually run with their real output."',
   "    verdict:",
+  "      type: string",
   "      enum: [pass, fail, blocked]",
-  "      metadata:",
-  '        description: "Overall outcome of this seat\'s mission."',
+  '      description: "Overall outcome of this seat\'s mission."',
+  '  required: ["summary", "report", "verdict"]',
+  "  additionalProperties: false",
 ].join("\n");
 
 function frontmatter(role: RoleSpec): string {
-  // Library seats carry their own copy, and a council member is the reviewer
-  // seat with a number on it — without these two steps every generated seat
-  // shipped the same placeholder and was indistinguishable in the agent picker.
+  // The id first, then the seat it executes as: one role carries two names, and
+  // a council member is the reviewer seat with a number on it — without both
+  // steps every generated seat shipped the same placeholder and was
+  // indistinguishable in the agent picker. Every seat that can be minted has an
+  // entry of its own: the catalog seats' purposes live in `SEAT_PURPOSE` beside
+  // the rest, because a description kept in the catalog alone was shadowed by
+  // those two lookups and never reached the picker at all.
   // Own properties only: a generated id such as `constructor` passes the id
   // regex and would otherwise resolve to an inherited Function, not a string.
   const description =
     (Object.hasOwn(SEAT_DESCRIPTION, role.id) ? SEAT_DESCRIPTION[role.id] : undefined) ??
-    (Object.hasOwn(SPECIALIST_DESCRIPTIONS, role.id) ? SPECIALIST_DESCRIPTIONS[role.id] : undefined) ??
     (Object.hasOwn(SEAT_DESCRIPTION, role.core) ? SEAT_DESCRIPTION[role.core] : undefined) ??
     "Role-fleet generated seat.";
   // The authority line is appended from the grant, never baked into the static
@@ -160,7 +175,24 @@ function frontmatter(role: RoleSpec): string {
     // self-referential one trips the host's cycle guard and silently degrades
     // to the built-in priority list. Vision itself is not a frontmatter key —
     // a vision seat is a seat whose model alias resolves to a vision model.
-    ...(role.needsVision ? ["advisor: true"] : []),
+    //
+    // Who earns it: the seats where being wrong is expensive and the work is
+    // not already cross-checked. The planner decides the shape every later wave
+    // follows, and a wrong plan poisons all of them; the implementer is the
+    // longest-running seat and the one that declares the work done. Keyed on
+    // `core`, so `migration-runner` and a proposed writer — the implementer seat
+    // under other ids — are covered by the same rule. Review seats are excluded
+    // on purpose: their value is independence *from* the cast, and a second
+    // model reviewing the reviewer's own turns buys agreement, not a second
+    // opinion. The grant is real but not free — the host pairs the seat's own
+    // session with the advisor model, which passively reviews each of its turns,
+    // so the cost scales with how long the seat runs and with whatever model the
+    // `advisor` role points at. It is also inert without one: subagents default
+    // to no advisor, this frontmatter is the opt-in, and the host's
+    // `task.agentAdvisor` setting overrides it per seat (`{"rf-planner": "off"}`).
+    ...(role.needsVision || role.core === "planner" || role.core === "implementer"
+      ? ["advisor: true"]
+      : []),
     "---",
     "",
   ].join("\n");

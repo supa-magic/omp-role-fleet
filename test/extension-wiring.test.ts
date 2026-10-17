@@ -301,6 +301,64 @@ test("the tool refuses a broken allowlist instead of planning unpinned", async (
   assert.ok(ok.details.agentDir, "a non-dry run must report where the agents landed");
 });
 
+test("the tool surface applies the same review-model rules as the flag path", async () => {
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as (
+    id: string,
+    params: Record<string, unknown>,
+    signal: null,
+    onUpdate: null,
+    ctx: unknown,
+  ) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+  const dir = await mkdtemp(join(tmpdir(), "rf-toolmodels-"));
+  const at = { cwd: dir };
+
+  // The flag path collapses duplicates because two members on one model is the
+  // double-priced single review this feature exists to avoid. The tool hands over
+  // a raw array, and the rule lived in the command-line parser — so the same list
+  // bought three identical reviewers here.
+  const dupes = await execute("id", { task: "review the auth fix", models: ["xai/grok-4", "xai/grok-4"], dryRun: true }, null, null, at);
+  assert.equal(dupes.isError, undefined);
+  assert.match(dupes.content[0].text, /• reviewer xai\/grok-4/, dupes.content[0].text.slice(0, 300));
+  assert.ok(!/reviewer-c\d/.test(dupes.content[0].text), `a duplicate member was seated: ${dupes.content[0].text}`);
+
+  // A blank entry must not fail the run either: it used to reach the gate and
+  // reject the whole plan with "role reviewer: no model".
+  const blank = await execute("id", { task: "fix the auth bug", models: ["  "], dryRun: true }, null, null, at);
+  assert.equal(blank.isError, undefined, "a blank entry must not fail the run");
+  assert.ok(!/rejected/.test(blank.content[0].text), `a blank entry rejected the run: ${blank.content[0].text}`);
+  assert.match(blank.content[0].text, /blank or duplicate/, "the dropped entry must be reported");
+
+  // A blank consul is no consul — and with no consul there is no reason to hand
+  // the council repo-wide write.
+  const consul = await execute("id", { task: "review the auth fix", council: 3, consul: "  ", dryRun: true }, null, null, at);
+  assert.ok(!/\bConsul\b/.test(consul.content[0].text), `a blank consul was seated: ${consul.content[0].text}`);
+  assert.ok(!/repo-wide write/.test(consul.content[0].text), "no consul means no write grant");
+});
+
+test("the tool's dispatch instructions carry the batch guardrails", async () => {
+  // The tool's consumer is the main model itself — the party most likely to add
+  // a `model:` to a task call — and it used to receive the batch with none of the
+  // instructions the command path states before dispatching.
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as (
+    id: string,
+    params: Record<string, unknown>,
+    signal: null,
+    onUpdate: null,
+    ctx: unknown,
+  ) => Promise<{ content: Array<{ text: string }> }>;
+  const dir = await mkdtemp(join(tmpdir(), "rf-toolguard-"));
+  const result = await execute("id", { task: "fix the auth bug" }, null, null, { cwd: dir });
+  const text = result.content[0].text;
+  assert.match(text, /Pass each item's `name` and `agent` exactly as given/);
+  assert.match(text, /`task` text/);
+  assert.match(text, /solutionSpace/);
+  assert.match(text, /Do NOT/);
+});
+
 test("the tool schema refuses a blank task, as the command already does", async () => {
   const host = stubHost();
   roleFleet(host.pi as never);
@@ -464,6 +522,25 @@ test("the command reports the version and prints usage for an empty task", async
     "an empty task must produce usage, not an opaque failure",
   );
   assert.equal(host.sent.length, 0);
+});
+
+test("a task that opens with the word version is planned, not answered", async () => {
+  // The version subcommand matched on the first word alone, so "version the api
+  // endpoints" printed the plugin version and could never be planned — with no
+  // way for the user to tell the command had swallowed their task.
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  const dir = await mkdtemp(join(tmpdir(), "rf-versionword-"));
+  const { ctx, notices } = commandCtx(dir);
+  await handler("version the api endpoints and document them", ctx);
+
+  assert.ok(
+    !notices.some((n) => n.text.includes("omp-role-fleet ")),
+    `the version was printed for a task: ${JSON.stringify(notices)}`,
+  );
+  assert.equal(host.sent.length, 1, "the task must be planned and dispatched");
+  assert.match(host.sent[0]!.message, /version the api endpoints/);
 });
 
 test("the command dispatches an approved plan to an idle session as a triggered turn", async () => {
@@ -817,6 +894,24 @@ test("--models never eats a word that is not bracketed", () => {
   assert.equal(cut.flags.models, undefined);
   assert.match(cut.problems[0] ?? "", /unbalanced bracket list/);
   assert.equal(cut.task, "fix the bug");
+});
+
+test("--models=(a, b) finishes the list the host split in two", () => {
+  // The host splits on whitespace, so a bracketed value in the `=` form arrives
+  // as two words — `--models=(a,` and `b)`. Reading only the first refused the
+  // list *and* left `b)` in the task text, while the spaced spelling of the same
+  // list planned fine: the flag's meaning depended on how it was typed.
+  const split = parseFlags(["--models=(xai/grok-4,", "zai/glm-5)", "fix the bug"]);
+  assert.deepEqual(split.flags.models, ["xai/grok-4", "zai/glm-5"]);
+  assert.equal(split.task, "fix the bug", "the rest of the list must not become task text");
+  assert.deepEqual(split.problems, []);
+
+  // A bracket no later word closes is a list cut short, not one the host split:
+  // the value is the single word, and the refusal names the bracket.
+  const cut = parseFlags(["--models=(xai/grok-4,", "fix", "the", "bug"]);
+  assert.equal(cut.flags.models, undefined);
+  assert.match(cut.problems[0] ?? "", /unbalanced bracket list/);
+  assert.equal(cut.task, "fix the bug", "nothing the user typed may disappear");
 });
 
 test("--models collapses duplicates and caps the list", () => {

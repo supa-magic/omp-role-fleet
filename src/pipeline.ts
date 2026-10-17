@@ -32,7 +32,15 @@ export function expandHome(path: string | undefined): string | undefined {
 }
 
 async function loadAllowlist(path: string): Promise<Fleet> {
-  const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Fleet>;
+  // `JSON.parse` reports the offset, not the file: `Unexpected token '}', "{…}"
+  // is not valid JSON` names neither the file nor the flag that loaded it,
+  // while every shape error below prefixes the path. One contract for both.
+  let parsed: Partial<Fleet>;
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Fleet>;
+  } catch (err) {
+    throw new Error(`${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
   if (!Array.isArray(parsed.models) || !parsed.models.length) {
     throw new Error(`${path}: "models" must be a non-empty array`);
   }
@@ -160,6 +168,33 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   const allowlist = raw && !isAbsolute(raw) ? join(opts.cwd, raw) : raw;
   const fleet = allowlist ? await loadAllowlist(allowlist) : undefined;
 
+  // The two fields that name review seats, made usable once for both surfaces.
+  // The command normalizes its list while parsing a command line
+  // (`parseModelList`); the tool hands over a raw JSON array, and the two
+  // disagreed about what is reachable — an empty entry rejected the whole plan
+  // ("role reviewer: no model"), a whitespace entry pinned a selector the host
+  // cannot resolve, and three copies of one model bought three identical
+  // reviews after the README promised duplicates collapse. This is the only
+  // place both surfaces pass through, so the value rules live here.
+  const seatNotes: string[] = [];
+  const named = opts.models?.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim()) ?? [];
+  const models = [...new Set(named)];
+  const dropped = (opts.models?.length ?? 0) - models.length;
+  if (dropped > 0) {
+    seatNotes.push(
+      `review models: ${dropped} blank or duplicate entr${dropped > 1 ? "ies" : "y"} dropped${
+        models.length ? ` (${models.length} left)` : ""
+      }`,
+    );
+  }
+  // A blank selector is the one value that must never be pinned: the host cannot
+  // resolve it, so the seat would run on the parent's model while the plan
+  // claimed it named one. No consul at all is the honest reading.
+  const consul = opts.consul?.trim() || undefined;
+  if (opts.consul !== undefined && !consul) {
+    seatNotes.push("consul: a blank selector was ignored — the session model will synthesize");
+  }
+
   const runId = nextRunId();
   // A council is worth its cost when the user asks for it or the task says
   // "council"/"different providers" explicitly; otherwise one reviewer stands.
@@ -168,10 +203,8 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // `--council` runs exactly two reviewers, because one reviewer per named model
   // is what the list means — padding it to the default three would spend runs
   // the user never asked for on models they did not name.
-  const council =
-    opts.council ??
-    (opts.models?.length ? opts.models.length : councilWords.test(opts.task) ? 3 : 0);
-  const councilSize = Math.max(council, opts.models?.length ?? 0);
+  const council = opts.council ?? (models.length ? models.length : councilWords.test(opts.task) ? 3 : 0);
+  const councilSize = Math.max(council, models.length);
 
   let plan = synthesizePlan({
     task: opts.task,
@@ -179,10 +212,11 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
     workDir: join(opts.cwd, ".role-fleet", runId),
     maxRoles: opts.maxRoles,
     council: councilSize,
-    ...(opts.models?.length ? { models: opts.models } : {}),
-    ...(opts.consul ? { consul: opts.consul } : {}),
+    ...(models.length ? { models } : {}),
+    ...(consul ? { consul } : {}),
     ...(opts.reviewOnly ? { reviewOnly: true } : {}),
   });
+  plan.notes.push(...seatNotes);
   // The run id travels with the plan: the agent files carry it, so a later run
   // can tell "stale file from a finished run" from "file a concurrent run is
   // still using" and leave the latter alone.
@@ -239,11 +273,21 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   let verdict = gate.verdict;
 
   let approved = gate.plan;
-  if (fleet && opts.models?.length) {
-    // Both retarget the review seats. Binding already ran, so the file wins for
-    // the seats it describes; saying so beats a plan whose models silently
-    // differ from the ones the user typed.
-    approved.notes.push(`--models overridden by the allowlist for the seats it describes`);
+  if (fleet && models.length) {
+    // Both retarget the review seats, and binding already ran, so the file wins
+    // for the seats it describes. Named one by one, with both models: the
+    // council line was composed before binding, so it still reads as the list the
+    // user typed, and a bare "overridden" note leaves the reader to work out
+    // which of the two model lists the run actually used. A seat the file *did*
+    // move is one whose own model changed between the plan and the bind, and
+    // `before` only counts the seats the named list itself had set — a council
+    // member past the end of the list kept its alias, and the file did not
+    // override the user there either.
+    const before = new Map(plan.roles.map((r) => [r.id, r.model]));
+    const moved = gate.plan.roles
+      .filter((r) => r.core === "reviewer" && before.get(r.id) !== r.model && models.includes(before.get(r.id) ?? ""))
+      .map((r) => `${r.id} ${before.get(r.id)} → ${r.model}`);
+    if (moved.length) approved.notes.push(`--models overridden by the allowlist: ${moved.join(", ")}`);
   }
 
   // Resolve aliases before anything is shown to anyone. A confirmation screen
@@ -295,6 +339,12 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
     }
     const kept = filterToSeats(approved.roles, chosen);
     const dropped = approved.roles.filter((r) => !kept.includes(r)).map((r) => r.id);
+    // No fleet argument: binding already ran and is idempotent on the selectors
+    // it produced, so re-binding here would add nothing. The consequence is that
+    // seat ordinals freeze at the first bind — dropping `reviewer-c1` leaves
+    // `reviewer-c2` on the second model of its chain rather than re-spreading the
+    // remaining members across it, which is the deliberate reading of "I want one
+    // of these three", not an oversight.
     const rechecked = gatePlan({ ...approved, roles: kept });
     if (!rechecked.ok || !rechecked.plan) {
       return {

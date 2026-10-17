@@ -152,7 +152,14 @@ council instead of dropping names. Whatever the plan could not honour is
 reported in its notes — a member past the end of your list, an analysis-only
 task with no reviewer to retarget, a duplicate name, a cap. Duplicates collapse,
 because two members on one model is the double-priced single review this flag
-exists to avoid.
+exists to avoid — and so do blank entries, which are dropped rather than pinned:
+an empty or whitespace selector is one the host cannot resolve, so the seat
+would run on your session model while the plan claimed it named one. Those two
+rules hold on both surfaces, the command and the `role_fleet_plan` tool, because
+they live in the pipeline both call — the tool's array is normalized exactly like
+a typed list. `--models=(a, b)` works as well as `--models (a, b)`: the host
+splits a command line on whitespace, so the pipeline reads on until the bracket
+the value opened is closed.
 
 If an allowlist is in play it still wins for the seats it describes, and the
 plan says so.
@@ -207,8 +214,8 @@ Run 7 seat(s) on @smol, @plan, @task, xai-oauth/grok-4.5, zai/glm-5.3, minimax-c
       Investigator — … — read-only
       Planner — … — read-only
 ○ One reviewer instead of three
-    One opinion instead of three — a third of the review cost. Drops Reviewer 2,
-    Reviewer 3. Consul goes too: nothing left for it to do.
+    One opinion instead of three — the review cost drops to a single run. Drops
+    Reviewer 2, Reviewer 3. Consul goes too: nothing left for it to do.
 ○ Choose each seat yourself
     Opens a checklist: every seat, what it does, which model it runs on, what it can write
 ```
@@ -345,6 +352,67 @@ exactly what the fallback replaced — so a seat asked that question reproduces
 the intended model and hides the one that produced the report. The answer comes
 from the host instead.
 
+### What each seat actually needs from a model
+
+The plugin ships no model list. A seat rides an alias, and which concrete model
+fills that alias is your `/model` configuration — so this is the part of the cast
+you tune, and the aliases are chosen so that tuning is one decision per class of
+work rather than one per seat:
+
+| Seat | Alias | What to point it at |
+|---|---|---|
+| scout, tester, docs | `@smol` | Your cheapest capable model. Recon, focused checks and doc updates are mechanical and latency-sensitive, and the heavy thinking has already happened somewhere else. |
+| planner | `@plan` | The strongest reasoner you are willing to pay for. It is the one seat where a handful of turns of better reasoning changes every later wave — and a bad plan is the most expensive outcome in the run — so this is where a premium model earns its rate. |
+| implementer | `@task` | A strong mid-tier with good agentic-coding scores. It executes a locked plan: the thinking is the planner's job, so the top tier's rate buys less here than it does one row up. |
+| reviewer, security, council | `@slow` | Your strongest reasoning, and **on a different provider from the implementer**. Three reviewers on one model repeat one blind spot three times; the spread is the feature. |
+| designer / vision seats | `@designer`, `@vision` | A natively multimodal model — the alias resolves to one and nothing else selects it. |
+| the advisor role | `advisor` | At or above the seats that carry `advisor: true`, or accept it as a cheap second glance. omp does not rank the pairing for you. |
+
+Two things follow. First, the fan-out is what costs money, not the plan: a
+council of five on a premium model is a deliberate spend, and `--models (…)` is
+how you name exactly which models those are. Second, if you want the mapping
+pinned in the plugin rather than in your session, that is the one thing the
+allowlist file is for — a seat it describes is bound to a concrete selector, and
+a seat it does not keeps its alias.
+
+### The host's advisor, and why this plugin does not re-implement it
+
+omp has its own advisor: a second model, assigned to the `advisor` role, that
+passively reviews an agent's turns and injects notes into it (`advisor.enabled`
+in settings, rosters via `WATCHDOG.yml`, the `advise` tool). It belongs to the
+host and this plugin uses it instead of duplicating it: a seat that should be
+watched carries `advisor: true` in its generated frontmatter, which is the
+per-agent opt-in — subagents run with the advisor switched off by default.
+
+The seats that carry it are the ones where being wrong is expensive and the work
+is not already cross-checked: the **planner**, because every later wave follows
+its plan, and the **implementer**, because it is the longest-running seat and the
+one that declares the work done (`migration-runner` and a proposed writer run
+that same seat under other ids, so they are covered by the same rule). Review
+seats deliberately do not: their value is independence *from* the cast, and a
+second model reviewing the reviewer's own turns buys agreement, not a second
+opinion.
+
+Three things to know before switching it on everywhere:
+
+- **It is not free.** The advisor reads the seat's turns, so the cost scales with
+  how long the seat runs and with whatever model `advisor` points at. The
+  planner is short; the implementer is the long one.
+- **omp does not rank the pairing.** There is no "advisor is less capable than
+  the main model" check — the runtime only distinguishes running/paused/quota
+  exhausted/error/no model — so pointing `advisor` at a cheaper model than the
+  seat buys a cheap second glance, not an escalation. Point `advisor` at your
+  strongest model if you want the escalation Claude Code's advisor describes.
+- **It is one flag per seat to turn off.** `task.agentAdvisor` in settings takes
+  `{"rf-planner": "off"}` — or a model pattern for that seat alone — and the
+  plugin never overrides it.
+
+This is a different axis from the plugin's own second-opinion tier: a council and
+its consul are independent reviewers on distinct models, run in parallel and
+reconciled *after* the work; the host's advisor is one model watching one seat
+*while* it works. Neither replaces the other, and `--consul` keeps its name for
+the seat that reconciles the council's reports.
+
 ---
 
 ## Reports are full or absent
@@ -364,6 +432,16 @@ with three required properties:
 
 A yield that leaves `report` empty is rejected by the host and the seat is sent
 back for the real thing, instead of the run quietly continuing on a summary.
+
+The schema is written in the JSON-Schema spelling — an explicit `type: object`
+with the three names in `required` — because that spelling is the one the host
+keeps intact. A root with `properties` and no `type` is read as JTD instead,
+where `properties` are required but each field's `description` is discarded in
+conversion, so the guidance the fields carry would never reach the seat. The
+`required` list is what makes the check real in the JSON-Schema branch: without
+it nothing there is required at all. `report` also carries `minLength: 1` —
+presence is not delivery, and a required field satisfied by an empty string is
+the same non-answer in a different shape.
 
 **A reading instruction in the dispatch prompt.** A long result reaches the main
 model as a truncated `<preview>` pointing at `agent://<id>`. The dispatch text
@@ -417,7 +495,14 @@ in full, names where they agree and where they do not, adopts the most
 conservative finding, and lists the claims only one reviewer raised and the
 claims none did. It runs in its own wave after the council, and the dispatch text
 tells the session model to report what the consul decided rather than to
-second-guess it.
+second-guess it. The selector is an alias (`@slow`) or a provider path of any
+depth — `zai/glm-5.3` and `openrouter/anthropic/claude-4` both work — and a bare
+name like `sonnet` is indistinguishable from a task word, so it goes in the `=`
+form (`--consul=sonnet`), where you separated the value yourself. A blank one is
+no consul: the seat is left out and the plan says the session model will
+synthesize, rather than pinning a deciding seat on a selector the host cannot
+resolve — and it never hands the council repo-wide `write` for a seat that cannot
+run.
 
 The reviewers gain `write` when a consul is present — write only, no `edit`.
 That is not a convenience: a read-only seat returns its report as a yield payload,
@@ -507,7 +592,13 @@ flowchart TD
    so a task containing `---` cannot break the definition.
 7. **Dispatch** — the roles of one wave go out as a single parallel `task` batch;
    the next wave waits for the previous one. Each batch item carries a readable
-   roster `name` (role + model) instead of omp's random `AdjectiveNoun` defaults.
+   roster `name` (role + model) instead of omp's random `AdjectiveNoun` defaults,
+   and the instructions that follow the batch name the rest of the item contract:
+   the host rejects an item with no `task` text and declares `solutionSpace`
+   beside it, and the batch deliberately carries neither — the identity is the
+   part that must not drift. The same instructions state what the call must *not*
+   carry (`model`, `tools`, `effort`: the definition pins all three), on both
+   surfaces, because the `role_fleet_plan` caller is the main model itself.
    A read-only seat cannot place its own artifact, so the instructions name every
    such path and tell the orchestrator to write the settled report there before the
    next wave starts — otherwise a downstream seat is sent to read a file nobody
@@ -524,7 +615,13 @@ worker.
 read-only `security-auditor` joins security wording on `@slow`; a
 `migration-runner` **replaces** the implementer for migrations, because a
 migration is implementation and two writers on the same files is a defect, not a
-feature. Audit-shaped tasks without build verbs drop the implementer and the
+feature. The runner's own shape decides that even when the task names no code
+vocabulary — "migrate off lodash", "upgrade the deps", "move off webpack" are all
+implementation, and reading the shape off the catalog pattern is what keeps the
+replacement from being skipped for want of an implementer to replace. A research
+framing is the exception and keeps its own cast: "research migration options" is
+an investigation *of* a migration, not a migration, and it mints no writer.
+Audit-shaped tasks without build verbs drop the implementer and the
 tester, so the auditor is never squeezed out by the role cap. On a task that
 *does* carry a build verb — "fix the injection bug" — the base cast already
 fills the cap and the auditor is the one dropped, with a note saying so; raise
@@ -587,7 +684,10 @@ naming them — while the read-only proposals from the same reply still merge.
   `/role-fleet` started while the first council is still running overwrites the
   shared seat names; the run-stamp guard stops the *older* run's prune from
   deleting the newer run's files, but it cannot stop the clobber. Concurrent
-  fleets in one working tree are not supported — use separate worktrees.
+  fleets in one working tree are not supported — use separate worktrees. The same
+  clash has a second shape across *processes*: run ids are strictly increasing
+  inside one process, so two runs started in different processes within the same
+  millisecond mint the same `run-<ms>` and neither guard sees the other as newer.
 - **Two main-session runs share one model-observation baseline.** A settled `task`
   result carries an agent name and no run id, so nothing in the payload tells seat
   X of plan A from seat X of plan B. The later dispatch records its expectations and

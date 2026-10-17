@@ -225,5 +225,30 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
           ]),
     );
   }
+  // The guardrails live here rather than in the command's wrapper because both
+  // surfaces render their batch through this function: the command hands the
+  // text to the main model, and the model tool's caller *is* the main model —
+  // the party most likely to add a `model:` to a task call. Two surfaces
+  // differing in what they warn about is the asymmetry this closes.
+  lines.push(
+    "Every agent above already exists as an omp agent definition whose model, tool",
+    "grant, and thinking level are pinned in its file. Dispatch each wave with the",
+    "task tool as a single batch, then wait for that wave before starting the next.",
+    // The identity is the one part that must be passed through verbatim: the
+    // roster `name` is what this table and every later wave address the seat by,
+    // and the host's task tool takes no model field, so the pair is the whole
+    // item. The host requires `task` on every item and declares `solutionSpace`
+    // beside it, while the batch above renders neither — the identity is what
+    // must not drift, so it is the only part rendered, and this is where a
+    // dispatcher learns the rest of the item is theirs to fill.
+    "Pass each item's `name` and `agent` exactly as given — the roster id is what",
+    "the table above and every later wave address that seat by — and give it its own",
+    "`task` text (the host rejects an item without one) plus a `solutionSpace` line",
+    "describing how open-ended that slice is. Do NOT set model, tools, or effort on",
+    "the task call: the task tool has no model field (the definition pins it),",
+    "treats a tools field as eval-defined tools, and overriding the agent's own",
+    "grant is what the definitions exist to prevent.",
+    "",
+  );
   return lines.join("\n");
 }

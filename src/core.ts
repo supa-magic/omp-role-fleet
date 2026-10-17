@@ -105,6 +105,7 @@ export const SEAT_PURPOSE: Record<string, string> = {
   "docs-updater": "keeps user-facing documentation true to shipped behavior",
   designer: "builds and polishes the interface, accessibility included",
   "security-auditor": "audits the surface for vulnerabilities, with evidence",
+  "migration-runner": "runs a dependency or framework migration in ordered, verifiable steps",
   "db-migration-auditor": "reviews the schema change and its rollback path",
 };
 

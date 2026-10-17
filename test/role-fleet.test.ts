@@ -409,6 +409,23 @@ test("--consul refuses a follower that is task text and says how to spell it", (
   }
 });
 
+test("--consul takes a nested provider path in either spelling", () => {
+  // A router selector is more than one segment deep, and the spaced form
+  // accepted exactly one: `openrouter/anthropic/claude-4` was refused there and
+  // accepted through `--consul=`, so the same selector worked or failed
+  // depending on how it was typed.
+  const spaced = parseFlags(["--consul", "openrouter/anthropic/claude-4", "audit the api"]);
+  assert.equal(spaced.flags.consul, "openrouter/anthropic/claude-4");
+  assert.deepEqual(spaced.problems, []);
+  assert.equal(spaced.task, "audit the api", "the selector must not become task text");
+
+  // The shape test is still a shape test: a task word with a leading slash is
+  // not a model, and a bare name is still told to use the `=` form.
+  const word = parseFlags(["--consul", "/fix", "the bug"]);
+  assert.equal(word.flags.consul, undefined);
+  assert.match(word.problems[0] ?? "", /needs @alias or provider\/id/);
+});
+
 test("--models refuses a list with a bracket left inside an entry", () => {
   // `(a,b))` unwraps to `a, b)`. Splitting it anyway pinned a selector of `b)`,
   // which the host cannot resolve — the seat then ran on the parent's model
@@ -422,6 +439,49 @@ test("--models refuses a list with a bracket left inside an entry", () => {
   const good = parseFlags(["--models=(a/1,b/2)", "fix the bug"]);
   assert.deepEqual(good.flags.models, ["a/1", "b/2"]);
   assert.deepEqual(good.problems, []);
+});
+
+test("the review model list is made usable before it reaches a seat", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-models-"));
+  const base = { task: "fix the auth bug", cwd: dir, dryRun: true };
+
+  // An empty entry used to reach `validatePlan` and reject the whole run with
+  // "role reviewer: no model" — opaque, and a run the flag path would have
+  // planned for the same list. A whitespace entry was worse in the other
+  // direction: it passed validation and was pinned into the agent file, so the
+  // seat ran on the parent's model while the plan claimed it named one.
+  for (const models of [[""], ["  "]]) {
+    const result = await runRoleFleet({ ...base, models });
+    assert.equal(result.ok, true, `a blank entry rejected the run: ${JSON.stringify(models)}`);
+    assert.equal(
+      result.plan!.roles.find((r) => r.core === "reviewer")!.model,
+      "@slow",
+      "the reviewer must keep its alias rather than a blank selector",
+    );
+    assert.ok(
+      result.plan!.notes.some((n) => n.includes("blank or duplicate")),
+      `the drop was not reported: ${result.plan!.notes.join(" | ")}`,
+    );
+  }
+
+  // Duplicates collapse to one reviewer per named model, exactly as the flag
+  // path does: two members on one model is the double-priced single review the
+  // README says this feature exists to avoid.
+  const dupes = await runRoleFleet({ ...base, models: ["xai/grok-4", "xai/grok-4"] });
+  const members = dupes.plan!.roles.filter((r) => r.core === "reviewer");
+  assert.equal(members.length, 1, `a duplicate was seated twice: ${JSON.stringify(members)}`);
+  assert.equal(members[0]!.model, "xai/grok-4");
+
+  // A blank consul is no consul. Seating one on a blank selector would mint the
+  // deciding seat on a model the host cannot resolve *and* grant every council
+  // member repo-wide write so their reports reach it.
+  const blank = await runRoleFleet({ ...base, council: 3, consul: "  " });
+  assert.ok(!blank.plan!.roles.some((r) => r.id === "consul"), "a blank consul was seated");
+  assert.ok(blank.plan!.notes.some((n) => n.includes("blank selector was ignored")));
+  assert.ok(
+    !blank.plan!.notes.some((n) => n.includes("repo-wide write")),
+    `no consul means no write grant: ${blank.plan!.notes.join(" | ")}`,
+  );
 });
 
 test("an allowlist keeps a review council on distinct models", () => {
@@ -777,7 +837,23 @@ test("every seat ships a report schema, so a bare summary cannot pass as a repor
     // deliverable. Without it a council member's paragraph is what the
     // synthesizer weighs, which is the failure this closes.
     assert.match(fm, /^output:/m, `${role.id} declares no output schema`);
-    assert.match(fm, /^ {4}report:$/m, `${role.id} has no required report field`);
+    assert.match(fm, /^ {4}report:$/m, `${role.id} has no report field`);
+    // The spelling is load-bearing, and both halves of it are: the host reads a
+    // root with `properties` and no `type` as JTD, where `properties` are
+    // required members — but the conversion rebuilds each node from JTD keywords
+    // alone and drops `metadata`, so the field descriptions never reach the
+    // model. Naming `type: object` takes the JSON-Schema branch the host keeps
+    // intact, and *that* branch requires nothing unless `required` says so.
+    assert.match(fm, /^ {2}type: object$/m, `${role.id} must declare a JSON-Schema root`);
+    assert.match(
+      fm,
+      /^ {2}required: \["summary", "report", "verdict"\]$/m,
+      `${role.id} must require all three fields`,
+    );
+    assert.match(fm, /^ {6}description: "One-paragraph headline/m, `${role.id} must describe its fields`);
+    // Presence is not delivery: `report: ""` satisfies a required list, so the
+    // deliverable field carries its own floor. The host enforces `minLength`.
+    assert.match(fm, /^ {6}minLength: 1$/m, `${role.id} must reject an empty report`);
     // No self-reported model field: a seat is told only which model it was
     // pinned to, so asking it what ran is asking the question that a fallback
     // invalidates. The host result carries the truth (model-observed.ts).
@@ -1026,6 +1102,35 @@ test("an older run's prune spares a newer, still-running run's agents", async ()
   );
 });
 
+test("the advisor rides the seats whose mistakes cost the whole wave", async () => {
+  // `advisor: true` pairs that seat's own session with the host's advisor-role
+  // model, which passively reviews each of its turns — the host's version of a
+  // stronger model at decision points. It is emitted for the planner, whose plan
+  // every later wave follows, and for the implementer seat including
+  // `migration-runner`, which runs that seat under its own id (`core`, not id, so
+  // a proposed writer is covered by the same rule). Review seats are excluded:
+  // their value is independence from the cast, so an advisor reviewing the
+  // reviewer's own turns buys agreement rather than a second opinion. And
+  // mechanical seats keep their cost — the host reviews every turn of an advised
+  // seat at the advisor model's rates, and nothing here is free.
+  const dir = await mkdtemp(join(tmpdir(), "rf-advisor-"));
+  const plan = planFor("migrate the api client off the old sdk across several files");
+  const advised: string[] = [];
+  for (const agent of await emitAgents(plan, dir)) {
+    if (/^advisor: true$/m.test(await readFile(agent.path, "utf8"))) advised.push(agent.role);
+  }
+  assert.deepEqual(advised.sort(), ["migration-runner", "planner"]);
+
+  // A vision seat keeps the flag it already had: the seat's model handles the
+  // images, and the advisor is the host's own pairing, not a vision key.
+  const visionDir = await mkdtemp(join(tmpdir(), "rf-advisor-vision-"));
+  const vision: string[] = [];
+  for (const agent of await emitAgents(planFor("redesign the landing page"), visionDir)) {
+    if (/^advisor: true$/m.test(await readFile(agent.path, "utf8"))) vision.push(agent.role);
+  }
+  assert.ok(vision.includes("designer"), `the vision seat lost its advisor: ${vision.join(",")}`);
+});
+
 test("a vision seat asks for the host's default advisor, not a model pattern", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-vision-"));
   const plan = planFor("redesign the landing page");
@@ -1037,6 +1142,20 @@ test("a vision seat asks for the host's default advisor, not a model pattern", a
   assert.ok(!body.includes('"@advisor"'), "a self-referential advisor pattern silently degrades in the host");
   // A generic blurb makes every generated seat indistinguishable in the picker.
   assert.match(body, /description: "Role-fleet designer:/);
+});
+
+test("a catalog seat's description comes from its own purpose, once", async () => {
+  // Two maps used to describe the same seats — the purpose table and a copy in
+  // the catalog — and the purpose table won every lookup, so the catalog's three
+  // entries were unreachable. One source per voice now: the catalog names the
+  // seat's match and grant, `SEAT_PURPOSE` says in the picker and the roster what
+  // it is for.
+  const dir = await mkdtemp(join(tmpdir(), "rf-catalogdesc-"));
+  const plan = planFor("migrate the api client to the new sdk and fix the tests");
+  const emitted = await emitAgents(plan, dir);
+  const body = await readFile(emitted.find((a) => a.role === "migration-runner")!.path, "utf8");
+  assert.match(body, /^description: "Role-fleet migration-runner: runs a dependency or framework migration/m);
+  assert.match(body, /Can change code\./, "the description still states the grant");
 });
 
 test("a dependency cycle is dispatched sequentially, not as one parallel batch", async () => {
@@ -1091,6 +1210,42 @@ test("dependents follow the specialist that replaced the implementer", () => {
 test("agent markdown quotes the alias so YAML stays valid", () => {
   const role = planFor("fix the bug").roles[0];
   assert.ok(agentMarkdown(planFor("fix the bug"), role).includes(`model: "${role.model}"`));
+});
+
+test("a consul run's reviewer brief does not claim it cannot write", () => {
+  // A consul turns each member into a writer so its report exists as a file —
+  // and the member's mission was copied from the static reviewer, which ended
+  // "Read-only." So the emitted brief told the seat it could not write in the
+  // one line it reads first, while the same file's frontmatter granted repo-wide
+  // `write`: the brief contradicting its own grant, on the seat whose authority
+  // the consent screen exists to state.
+  const plan = synthesizePlan({
+    task: "audit the api for injection risks",
+    cwd: "/tmp",
+    workDir: "/tmp/wf",
+    council: 3,
+    consul: "zai/glm-5",
+  });
+  const member = plan.roles.find((r) => isCouncilMember(r.id))!;
+  assert.ok(member.tools.includes("write"), "the consul reads reports that must exist as files");
+  const body = agentMarkdown(plan, member);
+  assert.match(body, /tools: \["read", "grep", "glob", "write"\]/, body.slice(0, 400));
+  assert.ok(!body.includes("Read-only"), `the brief denies the grant it was given: ${body.slice(0, 500)}`);
+});
+
+test("dispatch instructions state the item contract, not just the identity", async () => {
+  // The batch carries `name` and `agent` only — that pair is what must not
+  // drift — while the host rejects an item without `task` and declares
+  // `solutionSpace` beside it. This text is where a dispatcher learns the rest
+  // of the item is theirs to fill, and it lives in the renderer so both
+  // surfaces state it.
+  const dir = await mkdtemp(join(tmpdir(), "rf-guard-"));
+  const dispatch = renderDispatch(dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir)), dir);
+  assert.match(dispatch, /Pass each item's `name` and `agent` exactly as given/);
+  assert.match(dispatch, /`task` text/);
+  assert.match(dispatch, /solutionSpace/);
+  assert.match(dispatch, /Do NOT/);
+  assert.ok(!/"model"/.test(dispatch), "the batch must not carry a model field");
 });
 
 test("dispatch groups mirror dependency waves", async () => {
@@ -1148,6 +1303,71 @@ test("a malformed allowlist is refused, not ignored", async () => {
   assert.ok(result);
   assert.match(result.message, /non-empty/);
 });
+
+test("a syntax error in an allowlist names the file, like every shape error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-badjson-"));
+  const allowlist = join(dir, "broken.json");
+  await writeFile(allowlist, '{ "models": [ },', "utf8");
+
+  // `JSON.parse` reports the offset and quotes the document, so the message
+  // named neither the file nor the flag that opened it — the one failure a user
+  // can trigger by typing got the least actionable error in the plugin.
+  const err = await runRoleFleet({ task: "fix the auth bug", cwd: dir, dryRun: true, allowlist }).then(
+    () => null,
+    (thrown: unknown) => thrown as Error,
+  );
+  assert.ok(err, "a malformed file must be refused, not planned unpinned");
+  assert.ok(err.message.startsWith(`${allowlist}: `), `the file must be named: ${err.message}`);
+});
+
+test("the allowlist does not claim to have overridden a list it never touched", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-override-"));
+
+  // A file that describes no review seat leaves every named model in place, so
+  // there is nothing to report: the note used to fire on the mere presence of
+  // both inputs and described a run that did not happen.
+  const untouchedPath = join(dir, "untouched.json");
+  await writeFile(untouchedPath, JSON.stringify({ models: [{ selector: "a/one" }], roles: [] }), "utf8");
+  const untouched = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: dir,
+    dryRun: true,
+    models: ["x/1", "y/2"],
+    allowlist: untouchedPath,
+  });
+  assert.deepEqual(
+    untouched.plan!.roles.filter((r) => r.core === "reviewer").map((r) => r.model),
+    ["x/1", "y/2"],
+    "the named models must survive a file that describes no review seat",
+  );
+  assert.ok(
+    !untouched.plan!.notes.some((n) => n.includes("overridden")),
+    `an untouched list was reported as overridden: ${untouched.plan!.notes.join(" | ")}`,
+  );
+
+  // A file that does describe the seat wins for it, and says so.
+  const winningPath = join(dir, "winning.json");
+  await writeFile(
+    winningPath,
+    JSON.stringify({ models: [{ selector: "b/two" }], roles: [{ role: "reviewer", chain: ["b/two"] }] }),
+    "utf8",
+  );
+  const winning = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: dir,
+    dryRun: true,
+    models: ["x/1"],
+    allowlist: winningPath,
+  });
+  assert.equal(winning.plan!.roles.find((r) => r.core === "reviewer")!.model, "b/two");
+  const note = winning.plan!.notes.find((n) => n.includes("overridden"))!;
+  assert.ok(note, `the file won and never said so: ${winning.plan!.notes.join(" | ")}`);
+  // Named seat by seat, because the council line above it was composed before
+  // binding: a bare "overridden" leaves the reader to guess which of the two model
+  // lists the run used.
+  assert.match(note, /reviewer x\/1 → b\/two/, note);
+});
+
 test("the run directory exists as soon as agents are emitted", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-rundir-"));
   const result = await runRoleFleet({ task: "fix the auth bug", cwd: dir });
