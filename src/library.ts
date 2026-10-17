@@ -17,7 +17,7 @@ export interface Specialist {
   replacesImplementer?: boolean;
   /** Static description for the emitted agent's frontmatter. */
   description: string;
-  spec: Omit<RoleSpec, "depends_on" | "artifact"> & { dependsOn?: string[] };
+  spec: Omit<RoleSpec, "dependsOn" | "artifact"> & { dependsOn?: string[] };
 }
 
 export const SPECIALISTS: Specialist[] = [
@@ -37,7 +37,7 @@ export const SPECIALISTS: Specialist[] = [
       ],
       tools: WRITE_TOOLS,
       effort: "medium" as Effort,
-      needs_vision: true,
+      needsVision: true,
       // `@designer` is not a stock omp model role: it only resolves when the
       // user has a `modelRoles.designer` entry, and otherwise the host falls
       // back to the parent session's model. Documented in the README.
@@ -62,7 +62,7 @@ export const SPECIALISTS: Specialist[] = [
       ],
       tools: READ_TOOLS,
       effort: "high" as Effort,
-      needs_vision: false,
+      needsVision: false,
       model: "@slow",
       dependsOn: [],
     },
@@ -85,7 +85,7 @@ export const SPECIALISTS: Specialist[] = [
       ],
       tools: WRITE_TOOLS,
       effort: "high" as Effort,
-      needs_vision: false,
+      needsVision: false,
       model: "@task",
       dependsOn: ["scout"],
     },
@@ -106,6 +106,9 @@ export function applySpecialists(
   workDir: string,
   notes: string[],
   has: (id: string) => boolean,
+  /** The plan was deliberately reduced to analysis (`--review-only`, or an
+   *  audit that dropped the writer). Write seats are then out of the question. */
+  analysisOnly = false,
 ): RoleSpec[] {
   let next = [...roles];
   for (const specialist of SPECIALISTS) {
@@ -122,8 +125,8 @@ export function applySpecialists(
       // They now wait on the specialist that stands in for it — leaving the
       // removed id behind would fail validation for the whole plan.
       next = next.map((r) =>
-        (r.depends_on ?? []).includes("implementer")
-          ? { ...r, depends_on: (r.depends_on ?? []).map((d) => (d === "implementer" ? specialist.spec.id : d)) }
+        (r.dependsOn ?? []).includes("implementer")
+          ? { ...r, dependsOn: (r.dependsOn ?? []).map((d) => (d === "implementer" ? specialist.spec.id : d)) }
           : r,
       );
       notes.push(`implementer replaced by ${specialist.spec.id}`);
@@ -131,6 +134,18 @@ export function applySpecialists(
     }
 
     if (next.some((r) => r.id === specialist.spec.id)) continue;
+    // A write-granting specialist needs a plan that may implement something.
+    // A cast can be writer-free two different ways: a task that never asked
+    // for code (a landing page — where the designer *is* the implementation and
+    // must join), or a plan trimmed to analysis on purpose. Only the second
+    // blocks a writer. Keying on "does a writer already exist" would have
+    // defeated the audit thinning one line after it ran, and killed the
+    // designer for exactly the task it exists to serve.
+    const grants = specialist.spec.tools ?? [];
+    if (analysisOnly && grants.some((t) => t === "write" || t === "edit")) {
+      notes.push(`${specialist.spec.id}: analysis-only plan; no write seat added`);
+      continue;
+    }
     next.push(toRole(specialist, workDir, has));
     notes.push(`specialist ${specialist.spec.id} added`);
   }
@@ -140,7 +155,7 @@ export function applySpecialists(
 function toRole(specialist: Specialist, workDir: string, has: (id: string) => boolean): RoleSpec {
   const depends = (specialist.spec.dependsOn ?? []).filter(has);
   const { dependsOn: _dropped, ...rest } = specialist.spec;
-  return { ...rest, depends_on: depends, artifact: `${workDir}/${specialist.spec.id}.md` };
+  return { ...rest, dependsOn: depends, artifact: `${workDir}/${specialist.spec.id}.md` };
 }
 
 /** Static frontmatter descriptions for library seats (see agents.ts). */

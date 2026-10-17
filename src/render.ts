@@ -1,14 +1,29 @@
 /** Compact rendering of a plan, a verdict, and the dispatch groups. */
+import { isCouncilMember } from "./core.ts";
 import type { GateVerdict, RolePlan, RoleSpec } from "./core.ts";
-import type { DispatchGroup } from "./agents.ts";
+import type { DispatchGroup, EmittedAgent } from "./agents.ts";
+
+/**
+ * Model label for a role: the concrete `provider/id` when the host resolved
+ * the alias, the selector itself otherwise.
+ *
+ * The alias alone (`@slow`) says nothing about which model actually answers:
+ * the same alias points at a different model per provider, and the host may
+ * fall back to another one mid-run. A readable label carries the concrete id;
+ * the roster id and the run table both use it.
+ */
+function modelLabel(a: { model: string; modelResolved?: string }): string {
+  return a.modelResolved ?? a.model;
+}
 
 export function renderPlan(plan: RolePlan, waves: RoleSpec[][]): string {
   const lines: string[] = [`Task: ${plan.task}`, ""];
   waves.forEach((wave, i) => {
     lines.push(`Wave ${i + 1}${wave.length > 1 ? ` (parallel x${wave.length})` : ""}:`);
     for (const r of wave) {
-      const deps = r.depends_on?.length ? ` ← ${r.depends_on.join(", ")}` : "";
-      lines.push(`  • ${r.id} ${r.model}${deps}`);
+      const deps = r.dependsOn?.length ? ` ← ${r.dependsOn.join(", ")}` : "";
+      const model = r.modelResolved ? `${r.modelResolved} (${r.model})` : r.model;
+      lines.push(`  • ${r.id} ${model}${deps}`);
       lines.push(`      ${r.mission}`);
     }
   });
@@ -23,21 +38,51 @@ export function renderVerdict(v: GateVerdict): string {
   return lines.join("\n");
 }
 
-/** Human-readable roster id: role plus the model-role alias it rides. */
-function rosterName(a: { role: string; model: string }): string {
-  const alias = a.model
-    .replace("@", "")
-    .split("-")
+/** `payment-domain-a` → `PaymentDomainA`. */
+function camel(value: string): string {
+  return value
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join("");
-  const role = a.role
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
-  return `${role} ${alias}`;
 }
 
-/** The task tool's budget for a roster id. */
+/**
+ * Short model token for the roster id: the model id without its provider and
+ * version noise — `xai/grok-4` → `Grok4`, `anthropic/claude-sonnet-4-6` →
+ * `ClaudeSonnet46`. A roster id is capped at 32 characters, so the bare
+ * `provider/id` never fits; the full selector is one line above the roster.
+ */
+function shortModel(selector: string): string {
+  const id = selector.includes("/") ? selector.slice(selector.lastIndexOf("/") + 1) : selector;
+  return camel(id);
+}
+
+/**
+ * Human-readable roster id: role plus the model it rides.
+ *
+ * With a resolved model the concrete token replaces the alias, so the id reads
+ * `ReviewerC1 Grok4` rather than `ReviewerC1 Slow` — the alias is two different
+ * things (`@slow` may be one model today and another after a `/model` switch),
+ * and the roster is what the main model reports back to the user. Unresolved
+ * agents keep the alias label, so the id is never half-empty.
+ */
+function rosterName(a: { role: string; model: string; modelResolved?: string }): string {
+  const role = camel(a.role);
+  if (a.modelResolved) {
+    const model = shortModel(a.modelResolved);
+    return model && model !== role ? `${role} ${model}` : role;
+  }
+  const alias = a.model.startsWith("@") ? camel(a.model.slice(1)) : shortModel(a.model);
+  return alias && alias !== role ? `${role} ${alias}` : role;
+}
+
+/**
+ * The roster id budget. The `task` tool *declares* `name: CamelCase ≤32` in its
+ * own prompt but enforces only presence, effort, and case-insensitive
+ * uniqueness, so this cap is ours to keep and nothing upstream would catch a
+ * longer id.
+ */
 const ROSTER_LIMIT = 32;
 
 /**
@@ -49,7 +94,7 @@ const ROSTER_LIMIT = 32;
  * and the reviewer would have no way to say which is which. Collisions get a
  * numeric suffix and a tighter truncation rather than a silent duplicate.
  */
-function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string }>): string[] {
+function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string; modelResolved?: string }>): string[] {
   const used = new Set<string>();
   return agents.map((a) => {
     const base = rosterName(a).slice(0, ROSTER_LIMIT);
@@ -66,6 +111,28 @@ function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string
       }
     }
   });
+}
+
+/**
+ * One line per agent: roster id, role, and the model that runs it.
+ *
+ * The JSON batch the main model dispatches carries names only (the task tool
+ * has no model field), so without this table the concrete model exists in the
+ * run and nowhere in the output the user reads.
+ */
+function renderModelTable(agents: ReadonlyArray<EmittedAgent>, nameOf: Map<string, string>): string[] {
+  return [
+    "Models in this run (roster id → role → model):",
+    "",
+    ...agents.map((a) => {
+      const label = modelLabel(a);
+      // An allowlist pins a concrete selector, so echoing it back as the pinned
+      // value would just repeat the line.
+      const pinned = a.model !== label ? ` (pinned as \`${a.model}\`)` : "";
+      return `- \`${nameOf.get(a.agent)}\` — ${a.role} on \`${label}\`${pinned}`;
+    }),
+    "",
+  ];
 }
 
 /** Markdown the main model acts on: one task batch per wave. */
@@ -104,15 +171,58 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
       lines.push(`Wait for wave ${g.wave} to settle before starting wave ${g.wave + 1}.`, "");
     }
   });
+  lines.push(...renderModelTable(everyAgent, nameOf));
+  // A read-only seat cannot write its own artifact, and the seat brief tells it
+  // so — but the brief is written for the subagent, and the brief never reaches
+  // the party that would have to act on it. The downstream briefs point at those
+  // same paths ("Upstream artifacts"), so without this line the run depends on
+  // the main model independently guessing that it is the orchestrator named in
+  // the seat's instructions. Naming it here is what makes the contract a channel
+  // instead of a convention.
+  const readOnly = everyAgent.filter((a) => !a.writesOwnReport);
+  if (readOnly.length) {
+    lines.push(
+      "Read-only seats cannot write their artifact path. After each of these settles,",
+      "write its FULL returned `report` (not the summary) to the path below, before",
+      "starting the next wave — a downstream seat is told to read that file:",
+      "",
+      ...readOnly.map((a) => `- \`${nameOf.get(a.agent)}\` → ${a.artifact}`),
+      "",
+    );
+  }
+  // Every generated agent declares this schema, so a report that arrives
+  // without `report` did not fail to run — it came back as a summary, which is
+  // exactly the case where the council cannot reach a decision on its own.
+  lines.push(
+    "Read each agent's FULL returned report before concluding anything: its",
+    "`report` field is the complete deliverable (findings, evidence, per-item",
+    "detail) and `summary` is a headline, never a substitute. When a result",
+    "arrives as a truncated `<preview>` with `full-output: agent://<id>`, read",
+    "that URI instead of the preview.",
+    "",
+  );
   // Synthesis guidance belongs to the run that has something to synthesize; on a
   // single-scout plan it only invites reasoning about reviewers that do not exist.
-  const hasCouncil = groups.some((g) => g.agents.some((a) => /^reviewer-c\d$/.test(a.role)));
+  const hasCouncil = groups.some((g) => g.agents.some((a) => isCouncilMember(a.role)));
   if (hasCouncil) {
+    const hasConsul = groups.some((g) => g.agents.some((a) => a.role === "consul"));
     lines.push(
-      "When the review council reports arrive, read every one before concluding:",
-      "surface agreements and disagreements explicitly, and treat the most conservative",
-      "finding as the verdict — a risk one reviewer saw is a risk, even if the others missed it.",
-      "",
+      ...(hasConsul
+        ? [
+            // With a consul seat the synthesis is a dispatched agent's job, and
+            // a second opinion from the session model would undercut the very
+            // independence the council exists for.
+            "A `consul` seat reconciles the council's reports and writes the verdict:",
+            "do not synthesize the verdict yourself from their reports. Read its",
+            "`consul.md` once it settles, and report what it decided.",
+            "",
+          ]
+        : [
+            "When the review council reports arrive, read every one before concluding:",
+            "surface agreements and disagreements explicitly, and treat the most conservative",
+            "finding as the verdict — a risk one reviewer saw is a risk, even if the others missed it.",
+            "",
+          ]),
     );
   }
   return lines.join("\n");

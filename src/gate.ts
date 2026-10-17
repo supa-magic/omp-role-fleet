@@ -2,8 +2,8 @@
  * Static gate — the plan's own pass/fail check before anything is written.
  *
  * Named `gate`, not `advisor`, because oh-my-pi's built-in advisor is a
- * different thing entirely; that one is observed in `advisor-watch.ts`. This
- * module validates the plan and returns a verdict. Nothing else.
+ * different thing entirely and belongs to the host. This module validates the
+ * plan and returns a verdict. Nothing else.
  *
  * omp's own advisor reviews the dispatch once the main model runs it; this pass
  * catches what must never reach the model: empty plans, unknown dependencies,

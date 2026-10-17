@@ -1,13 +1,25 @@
+/**
+ * End-to-end behaviour of the fleet: alias mapping, synthesis, the gate,
+ * council and consul seating, the flag parser, agent emission and dispatch
+ * rendering.
+ *
+ * The largest file here on purpose — these are whole-run assertions across the
+ * pipeline, and splitting them by module would put each test next to an
+ * implementation it is meant to be independent of. The specialist tiers have
+ * their own file; the confirmation screen and the settled-run observer have
+ * theirs.
+ */
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { aliasFor, bindFleet, planWaves, validatePlan, type Fleet, type RoleSpec } from "../src/core.ts";
+import { aliasFor, bindFleet, isCouncilMember, planWaves, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
 import { gatePlan } from "../src/gate.ts";
-import { agentMarkdown, dispatchGroups, emitAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
+import { agentMarkdown, dispatchGroups, emitAgents, pruneGeneratedAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
+import { parseFlags } from "../src/index.ts";
 import { renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
 
 function planFor(task: string, maxRoles?: number) {
@@ -35,7 +47,7 @@ test("a code task plans implementer plus a dependent reviewer on @task/@slow", (
   const review = plan.roles.find((r) => r.id === "reviewer")!;
   assert.equal(impl.model, "@task");
   assert.equal(review.model, "@slow");
-  assert.ok(review.depends_on.includes("implementer"));
+  assert.ok(review.dependsOn.includes("implementer"));
   assert.deepEqual(validatePlan(plan), []);
 });
 
@@ -72,7 +84,7 @@ test("waves are dependency-ordered and cover every role", () => {
   const seen = new Set<string>();
   for (const wave of waves) {
     for (const r of wave) {
-      for (const d of r.depends_on) assert.ok(seen.has(d), `${r.id} ran before ${d}`);
+      for (const d of r.dependsOn) assert.ok(seen.has(d), `${r.id} ran before ${d}`);
       seen.add(r.id);
     }
   }
@@ -81,8 +93,8 @@ test("waves are dependency-ordered and cover every role", () => {
 
 test("a dependency cycle still terminates in a final wave", () => {
   const base = planFor("x").roles[0];
-  const a: RoleSpec = { ...base, id: "a", depends_on: ["b"] };
-  const b: RoleSpec = { ...base, id: "b", depends_on: ["a"] };
+  const a: RoleSpec = { ...base, id: "a", dependsOn: ["b"] };
+  const b: RoleSpec = { ...base, id: "b", dependsOn: ["a"] };
   const waves = planWaves([a, b]);
   assert.equal(waves.length, 1);
   assert.equal(waves[0].length, 2);
@@ -92,7 +104,7 @@ test("a dependency cycle still terminates in a final wave", () => {
 
 test("the gate rejects plans with unknown dependencies and missing acceptance", () => {
   const plan = planFor("fix the bug");
-  const tampered = { ...plan, roles: [{ ...plan.roles[0], depends_on: ["ghost"], acceptance: [] }] };
+  const tampered = { ...plan, roles: [{ ...plan.roles[0], dependsOn: ["ghost"], acceptance: [] }] };
   const gate = gatePlan(tampered);
   assert.equal(gate.ok, false);
   assert.ok(gate.verdict.issues.some((i) => i.includes("unknown dependency")));
@@ -155,6 +167,263 @@ const COUNCIL_FLEET: Fleet = {
   ],
 };
 
+test("a named model list runs one council member per model, in order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-models-flag-"));
+  const result = await runRoleFleet({
+    task: "review the auth refactor",
+    cwd: dir,
+    models: ["xai/grok-4", "zai/glm-5", "anthropic/claude-opus-4-6"],
+  });
+  assert.equal(result.ok, true);
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
+  assert.equal(members.length, 3, "the list itself is the ask for several eyes — no --council needed");
+  assert.deepEqual(members.map((m) => m.model), ["xai/grok-4", "zai/glm-5", "anthropic/claude-opus-4-6"]);
+  // The run survives the gate with concrete selectors rather than aliases.
+  assert.deepEqual(validatePlan(result.plan!), []);
+  for (const agent of result.agents.filter((a) => isCouncilMember(a.role))) {
+    const body = await readFile(agent.path, "utf8");
+    assert.ok(body.includes(`model: "${agent.model}"`), `${agent.role} must pin the named model`);
+  }
+});
+
+test("a two-model list still runs a council, and a one-model list retargets the reviewer", async () => {
+  const two = await runRoleFleet({
+    task: "review the auth refactor",
+    cwd: await mkdtemp(join(tmpdir(), "rf-two-")),
+    models: ["xai/grok-4", "zai/glm-5"],
+  });
+  assert.deepEqual(
+    two.plan!.roles.filter((r) => isCouncilMember(r.id)).map((m) => m.model),
+    ["xai/grok-4", "zai/glm-5"],
+  );
+
+  const one = await runRoleFleet({
+    task: "review the auth refactor",
+    cwd: await mkdtemp(join(tmpdir(), "rf-one-")),
+    models: ["xai/grok-4"],
+  });
+  // A council of one would be the same review twice; the reviewer already in the
+  // plan is retargeted instead.
+  assert.equal(one.plan!.roles.filter((r) => isCouncilMember(r.id)).length, 0);
+  const reviewer = one.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(reviewer.model, "xai/grok-4");
+  assert.ok(
+    one.plan!.notes.some((n) => n.includes("xai/grok-4") && n.includes("@slow")),
+    `the retarget must be stated: ${one.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a list shorter than the council says which members fell back to an alias", async () => {
+  const result = await runRoleFleet({
+    task: "review with a council",
+    cwd: await mkdtemp(join(tmpdir(), "rf-short-")),
+    council: 3,
+    models: ["xai/grok-4", "zai/glm-5"],
+  });
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
+  assert.equal(members.length, 3);
+  assert.equal(members[2]!.model, "@plan", "the unnamed member keeps its alias");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("past your list")),
+    `the unnamed member must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a named list on an analysis-only plan says there is no reviewer to retarget", async () => {
+  const result = await runRoleFleet({
+    task: "explain how the adapter layer works",
+    cwd: await mkdtemp(join(tmpdir(), "rf-analysis-")),
+    models: ["xai/grok-4"],
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("--models") && n.includes("no reviewer")),
+    `a silent no-op is the failure here: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("an allowlist outranks a named list, and the plan says so", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-conflict-"));
+  const file = join(dir, "fleet.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      models: [{ selector: "pinned/model", aliases: ["pinned"] }],
+      roles: [{ role: "reviewer", chain: ["pinned", "pinned", "pinned"] }],
+    }),
+    "utf8",
+  );
+  const result = await runRoleFleet({ task: "review it", cwd: dir, allowlist: file, models: ["xai/grok-4", "zai/glm-5"] });
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
+  assert.ok(members.every((m) => m.model === "pinned/model"), "the file constrains the seats it describes");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("--models") && n.includes("allowlist")),
+    `the override must be visible: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("--consul adds a deciding seat after the council, and members can hand it reports", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-consul-"));
+  const result = await runRoleFleet({
+    task: "review the auth refactor",
+    cwd: dir,
+    models: ["xai/grok-4", "zai/glm-5"],
+    consul: "anthropic/claude-opus-4-6",
+  });
+  assert.equal(result.ok, true);
+  const consul = result.plan!.roles.find((r) => r.id === "consul");
+  assert.ok(consul, "the deciding seat must exist");
+  assert.equal(consul!.model, "anthropic/claude-opus-4-6");
+  assert.deepEqual(consul!.dependsOn.sort(), ["reviewer-c1", "reviewer-c2"]);
+  // It waits for every member, and lands in a later wave than all of them.
+  const waveOf = (id: string) => result.waves.findIndex((w) => w.some((r) => r.id === id));
+  for (const member of ["reviewer-c1", "reviewer-c2"]) {
+    assert.ok(waveOf("consul") > waveOf(member), `${member} must settle before the consul runs`);
+  }
+
+  // The reports have to exist as files for the consul to read them: a read-only
+  // member returns its report as a yield payload, and `review-cN.md` would be a
+  // path nobody ever writes.
+  const members = result.agents.filter((a) => isCouncilMember(a.role));
+  assert.ok(members.every((m) => m.model), "members exist");
+  for (const role of result.plan!.roles.filter((r) => isCouncilMember(r.id))) {
+    assert.ok(role.tools.includes("write"), `${role.id} must be able to write its report`);
+    assert.ok(!role.tools.includes("edit"), `${role.id} must not gain source-file edits`);
+    assert.ok(role.acceptance.some((a) => a.includes(role.artifact)), `${role.id} must be told where to write`);
+  }
+  // The written path is the one the consul is told to read.
+  assert.match(consul!.mission, /Read every council report in full/);
+  assert.match(consul!.acceptance.join(" "), /Every council report read in full/);
+
+  // The dispatch hands synthesis to the seat instead of asking the session to
+  // second-guess it.
+  const dispatch = renderDispatch(result.groups, result.agentDir!);
+  assert.match(dispatch, /`consul` seat reconciles/);
+  assert.ok(!dispatch.includes("treat the most conservative"), "the session must not synthesize as well");
+});
+
+test("without --consul the session model keeps the synthesis, unchanged", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-no-consul-"));
+  const result = await runRoleFleet({ task: "review the auth refactor", cwd: dir, models: ["xai/grok-4", "zai/glm-5"] });
+  assert.equal(result.plan!.roles.some((r) => r.id === "consul"), false);
+  // The status quo is the main model reading the council itself.
+  assert.match(renderDispatch(result.groups, result.agentDir!), /treat the most conservative/);
+});
+
+test("--consul without a council says the session model will synthesize", async () => {
+  const result = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: await mkdtemp(join(tmpdir(), "rf-consul-none-")),
+    consul: "anthropic/claude-opus-4-6",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.plan!.roles.some((r) => r.id === "consul"), false);
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("--consul") && n.includes("session model")),
+    `a silent no-op is the failure: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("the role cap never drops the consul", async () => {
+  const result = await runRoleFleet({
+    task: "refactor the auth module and review it",
+    cwd: await mkdtemp(join(tmpdir(), "rf-consul-cap-")),
+    maxRoles: 2,
+    models: ["xai/grok-4", "zai/glm-5"],
+    consul: "anthropic/claude-opus-4-6",
+  });
+  // A dropped consul would silently hand synthesis back to the session model,
+  // so the run would look successful while doing the thing the user turned off.
+  assert.ok(result.plan!.roles.some((r) => r.id === "consul"), "the deciding seat is exempt from the cap");
+});
+
+test("--consul refuses a follower that is task text and says how to spell it", () => {
+  const eaten = parseFlags(["--consul", "fix", "the", "login", "bug"]);
+  assert.equal(eaten.flags.consul, undefined);
+  // The refusal names the two accepted spellings rather than just rejecting: a
+  // bare id like `sonnet` is legitimate, it simply cannot be told apart from the
+  // task's first word in the spaced form. Pointing at `--consul=sonnet` is what
+  // makes the rejection actionable instead of a dead end.
+  assert.match(eaten.problems[0] ?? "", /--consul needs @alias or provider\/id/);
+  assert.match(eaten.problems[0] ?? "", /--consul=NAME/);
+  // The deciding seat stays on the session model, and the word is not lost.
+  assert.match(eaten.problems[0] ?? "", /session model/);
+  assert.equal(eaten.task, "fix the login bug");
+
+  const inline = parseFlags(["--consul=xai/grok-4", "fix the bug"]);
+  assert.equal(inline.flags.consul, "xai/grok-4");
+  assert.deepEqual(inline.problems, []);
+
+  // A model is `@alias` or `provider/id`, structurally. The earlier test was
+  // "contains @, /, or a digit", which accepted `/fix` and `v2` — task words that
+  // happen to carry one — and pinned them as selectors the host cannot resolve, so
+  // the seat ran on the parent's model while the plan claimed a provider it never
+  // had. A bare id is therefore refused in the spaced form, and the word stays in
+  // the task.
+  const bare = parseFlags(["--consul", "glm-5", "fix the bug"]);
+  assert.equal(bare.flags.consul, undefined);
+  assert.equal(bare.task, "glm-5 fix the bug", "the refused word must not vanish");
+
+  const digitWord = parseFlags(["--consul", "v2", "of the api", "is", "stale"]);
+  assert.equal(digitWord.flags.consul, undefined, "a task word carrying a digit is not a model");
+
+  // The same ids are reachable through the `=` form, where the user separated the
+  // value themselves — which is what closes the old asymmetry against `--models`,
+  // whose bracketed list has always taken `sonnet`.
+  for (const spelling of ["sonnet", "glm-5", "anthropic/claude-opus-4-6", "@slow"]) {
+    const via = parseFlags([`--consul=${spelling}`, "fix the bug"]);
+    assert.equal(via.flags.consul, spelling, `--consul=${spelling} was not taken`);
+    assert.deepEqual(via.problems, []);
+    assert.equal(via.task, "fix the bug");
+  }
+
+  // An alias is unambiguous, so the spaced form keeps working for it.
+  const aliased = parseFlags(["--consul", "@slow", "fix the bug"]);
+  assert.equal(aliased.flags.consul, "@slow");
+  assert.equal(aliased.task, "fix the bug");
+  // A leading slash is a path-shaped word, not a provider/id pair: the old
+  // "contains /" test accepted `/fix` and pinned a selector that resolves to
+  // nothing, which put the deciding seat on the parent's model while the plan
+  // named a provider it never had.
+  const slashWord = parseFlags(["--consul", "/fix", "the", "login", "bug"]);
+  assert.equal(slashWord.flags.consul, undefined, "a leading slash is not provider/id");
+  assert.equal(slashWord.task, "/fix the login bug");
+
+  // Quotes survive the host's whitespace-only split, so they must be stripped
+  // rather than pinned verbatim into the agent frontmatter.
+  const quoted = parseFlags(["--consul", '"xai/grok-4"', "fix the bug"]);
+  assert.equal(quoted.flags.consul, "xai/grok-4", `quotes leaked: ${JSON.stringify(quoted.flags.consul)}`);
+  assert.equal(quoted.task, "fix the bug");
+
+  // A blank value is the one thing that must never be pinned. `Boolean(" ")` is
+  // true, so a quoted `--consul=" "` would mint the deciding seat on a selector
+  // the host cannot resolve, and synthesis sees a truthy string and adds no note
+  // — the deciding seat then silently runs on the parent model, which is the
+  // exact outcome every other refusal in this parser exists to prevent.
+  for (const blank of ["--consul=", "--consul=   ", `--consul="${"  "}"`]) {
+    const empty = parseFlags([blank, "fix the bug"]);
+    assert.equal(empty.flags.consul, undefined, `a blank value was pinned: ${JSON.stringify(blank)}`);
+    assert.equal(empty.problems.length, 1, `no refusal reported for ${JSON.stringify(blank)}`);
+    assert.match(empty.problems[0] ?? "", /--consul needs @alias or provider\/id/);
+    assert.equal(empty.task, "fix the bug");
+  }
+});
+
+test("--models refuses a list with a bracket left inside an entry", () => {
+  // `(a,b))` unwraps to `a, b)`. Splitting it anyway pinned a selector of `b)`,
+  // which the host cannot resolve — the seat then ran on the parent's model
+  // while the plan and the roster both claimed a provider it never had.
+  const cut = parseFlags(["--models=(a,b))", "fix the bug"]);
+  assert.equal(cut.flags.models, undefined);
+  assert.match(cut.problems[0] ?? "", /malformed entries/);
+  assert.equal(cut.task, "fix the bug", "the task must survive the refusal");
+
+  // A well-formed list of the same length is still accepted.
+  const good = parseFlags(["--models=(a/1,b/2)", "fix the bug"]);
+  assert.deepEqual(good.flags.models, ["a/1", "b/2"]);
+  assert.deepEqual(good.problems, []);
+});
+
 test("an allowlist keeps a review council on distinct models", () => {
   const plan = synthesizePlan({
     task: "review with different providers",
@@ -164,7 +433,7 @@ test("an allowlist keeps a review council on distinct models", () => {
   });
   const gate = gatePlan(plan, COUNCIL_FLEET);
   assert.equal(gate.ok, true);
-  const members = gate.plan!.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = gate.plan!.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3);
   assert.equal(
     new Set(members.map((m) => m.model)).size,
@@ -178,7 +447,7 @@ test("a council keeps its own aliases when the file has too few models to spread
   const notes: string[] = [];
   const plan = synthesizePlan({ task: "review with different providers", cwd: "/tmp", workDir: "/tmp/wf", council: 3 });
   const roles = bindFleet(oneModel, plan.roles, notes);
-  const members = roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = roles.filter((r) => isCouncilMember(r.id));
   assert.equal(new Set(members.map((m) => m.model)).size, 3, "the spread must not silently collapse");
   assert.ok(notes.some((n) => n.includes("keeping")), "a shortfall must be reported");
 });
@@ -249,10 +518,12 @@ test("dirty task text cannot break the frontmatter", async () => {
   for (const agent of result.agents) {
     const body = await readFile(agent.path, "utf8");
     const fm = body.split("---")[1] ?? "";
-    // Every frontmatter line is a known key: task text lives only in the body.
-    const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor"]);
-    for (const line of fm.split("\n").filter(Boolean)) {
-      assert.ok(known.has(line.trim().split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
+    // Every top-level frontmatter key is a known one: task text lives only in
+    // the body, and the nested `output:` schema block is indented, so a
+    // zero-indent line is always a top-level key.
+    const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor", "output"]);
+    for (const line of fm.split("\n").filter((l) => l.length > 0 && !/^\s/.test(l))) {
+      assert.ok(known.has(line.split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
     }
     assert.match(fm, /^name: rf-/m);
     // The dirty text itself appears in the body, unharmed.
@@ -267,9 +538,9 @@ test("a model name with a newline cannot inject frontmatter keys", () => {
   const role = { ...planFor("fix the bug").roles[0], model: '@task"\ntools: [write, bash]' };
   const fm = agentMarkdown(planFor("fix the bug"), role).split("---")[1] ?? "";
 
-  const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor"]);
-  for (const line of fm.split("\n").filter(Boolean)) {
-    assert.ok(known.has(line.trim().split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
+  const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor", "output"]);
+  for (const line of fm.split("\n").filter((l) => l.length > 0 && !/^\s/.test(l))) {
+    assert.ok(known.has(line.split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
   }
   assert.equal((fm.match(/^tools:/gm) ?? []).length, 1, "tools key must not be injected twice");
 });
@@ -336,7 +607,7 @@ test("a seat spelled two ways still spreads a council across distinct models", (
   assert.equal(bound[1].model, "slow/model");
 });
 
-test("council members do not share one depends_on array", () => {
+test("council members do not share one dependsOn array", () => {
   // One shared instance meant any in-place edit of one member's dependencies
   // edited all of them — a hazard the moment anything mutates a plan.
   const plan = synthesizePlan({
@@ -345,13 +616,13 @@ test("council members do not share one depends_on array", () => {
     workDir: "/tmp/w",
     council: 3,
   });
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3);
-  assert.equal(new Set(members.map((m) => m.depends_on)).size, 3, "each member needs its own array");
+  assert.equal(new Set(members.map((m) => m.dependsOn)).size, 3, "each member needs its own array");
 
   // And mutating one really does leave the others alone.
-  members[0]!.depends_on.push("scout");
-  assert.deepEqual(members[1]!.depends_on, ["scout"]);
+  members[0]!.dependsOn.push("scout");
+  assert.deepEqual(members[1]!.dependsOn, ["scout"]);
 });
 
 test("roster ids stay unique and within budget even when truncation collides", async () => {
@@ -367,6 +638,7 @@ test("roster ids stay unique and within budget even when truncation collides", a
     model: "@task",
     artifact: "",
     dependsOn: [],
+    writesOwnReport: false,
   });
   const groups: DispatchGroup[] = [
     {
@@ -387,6 +659,80 @@ test("roster ids stay unique and within budget even when truncation collides", a
   for (const n of names) assert.ok(n.length <= 32, `roster id over budget: ${n}`);
 });
 
+test("the plan names the concrete model behind every alias", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-models-"));
+  const result = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: dir,
+    resolveModel: (spec) => `mock/${spec.replace("@", "role-")}`,
+  });
+  assert.equal(result.ok, true);
+  // `@slow` says which class of work the seat is for; `provider/id` says what
+  // actually answers. A user who has to guess which one ran cannot tell a
+  // fallback from the intended model.
+  const impl = result.plan!.roles.find((r) => r.id === "implementer")!;
+  assert.equal(impl.model, "@task", "the pinned selector must stay an alias");
+  assert.equal(impl.modelResolved, "mock/role-task");
+  const text = renderPlan(result.plan!, result.waves);
+  assert.match(text, /implementer mock\/role-task \(@task\)/);
+  for (const agent of result.agents) {
+    assert.equal(agent.modelResolved, `mock/${agent.model.replace("@", "role-")}`);
+  }
+});
+
+test("a selector the host cannot resolve keeps its alias and claims nothing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-unresolved-"));
+  const result = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: dir,
+    // Only one seat resolves: a `@designer` with no modelRoles entry is the real
+    // case, and a guessed model there would be a fabrication.
+    resolveModel: (spec) => (spec === "@task" ? "mock/fast-1" : undefined),
+  });
+  const impl = result.plan!.roles.find((r) => r.id === "implementer")!;
+  assert.equal(impl.modelResolved, "mock/fast-1");
+  const review = result.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(review.modelResolved, undefined, "an unresolved seat must not carry a guess");
+
+  const text = renderPlan(result.plan!, result.waves);
+  assert.match(text, /reviewer @slow/, "an unresolved seat keeps the alias label");
+  assert.ok(!text.includes("reviewer undefined"));
+});
+
+test("the roster and the run table carry the concrete model, not the tier", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-roster-models-"));
+  const agentsDir = join(dir, "agents");
+  const result = await runRoleFleet({
+    task: "review with different providers",
+    cwd: dir,
+    council: 3,
+    resolveModel: (spec) => `mock/${spec.replace("@", "role-")}-7`,
+  });
+  const text = renderDispatch(result.groups, agentsDir);
+
+  // The tier names alone tell the user nothing about which model answered.
+  assert.ok(!/"name": "ReviewerC\d+ (Slow|Task|Plan)"/.test(text), `roster still shows tiers: ${text}`);
+  assert.match(text, /"name": "ReviewerC1 RoleSlow7"/);
+  // The full selector is one line above the roster: the plugin caps roster ids
+  // at 32 characters, so the bare `provider/id` cannot live inside the name.
+  assert.match(text, /- `ReviewerC1 RoleSlow7` — reviewer-c1 on `mock\/role-slow-7` \(pinned as `@slow`\)/);
+
+  for (const m of text.matchAll(/"name": "([^"]+)"/g)) {
+    assert.ok(m[1]!.length <= 32, `name over budget: ${m[1]}`);
+  }
+});
+
+test("dispatch tells the main model to read the whole report, not the headline", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-full-report-"));
+  const result = await runRoleFleet({ task: "fix the auth bug", cwd: dir });
+  const text = renderDispatch(result.groups, join(dir, "agents"));
+  // The host previews a long result and points at `agent://<id>`; deciding on
+  // the preview is how a council concludes on half a review.
+  assert.match(text, /FULL returned report/);
+  assert.match(text, /`summary` is a headline/);
+  assert.match(text, /agent:\/\/<id>/);
+});
+
 test("a council exempt from the cap still reports the real fan-out", () => {
   const plan = synthesizePlan({
     task: "fix the auth bug",
@@ -402,7 +748,7 @@ test("a council exempt from the cap still reports the real fan-out", () => {
   );
 });
 
-test("a read-only role is told to return its report, not to write a file", () => {
+test("a read-only role is told to yield its report, not to write a file", () => {
   const plan = planFor("fix the auth bug");
   const scout = plan.roles.find((r) => r.id === "scout")!;
   const impl = plan.roles.find((r) => r.id === "implementer")!;
@@ -412,7 +758,7 @@ test("a read-only role is told to return its report, not to write a file", () =>
   // agent must fail: it reports the blocked path instead of the findings.
   const scoutBody = agentMarkdown(plan, scout);
   assert.ok(!scoutBody.includes("- Write your report to"), "a read-only role must not be told to write");
-  assert.match(scoutBody, /[Rr]eturn your report as your final message/);
+  assert.match(scoutBody, /Yield your full report/);
   // The artifact path stays in the brief and names who writes it: the report
   // belongs at that path either way, and a downstream agent has no way to read
   // any other agent's message.
@@ -422,13 +768,47 @@ test("a read-only role is told to return its report, not to write a file", () =>
   assert.match(agentMarkdown(plan, impl), /Write your report to `.*implementation\.md`/);
 });
 
+test("every seat ships a report schema, so a bare summary cannot pass as a report", () => {
+  const plan = planFor("fix the auth bug");
+  for (const role of plan.roles) {
+    const fm = agentMarkdown(plan, role).split("---")[1] ?? "";
+    // The host validates yields against this schema: a result without a
+    // required `report` is rejected and the seat is sent back for the full
+    // deliverable. Without it a council member's paragraph is what the
+    // synthesizer weighs, which is the failure this closes.
+    assert.match(fm, /^output:/m, `${role.id} declares no output schema`);
+    assert.match(fm, /^ {4}report:$/m, `${role.id} has no required report field`);
+    // No self-reported model field: a seat is told only which model it was
+    // pinned to, so asking it what ran is asking the question that a fallback
+    // invalidates. The host result carries the truth (model-observed.ts).
+    assert.ok(!fm.includes("model_used"), `${role.id} must not self-report the model it ran on`);
+    const body = agentMarkdown(plan, role);
+    assert.match(body, /`summary` is a headline/, `${role.id} does not separate summary from report`);
+  }
+});
+
+test("a seat states the model it was pinned to and the one it resolved to", () => {
+  const plan = planFor("fix the auth bug");
+  const scout = plan.roles.find((r) => r.id === "scout")!;
+  const unresolved = agentMarkdown(plan, scout);
+  assert.match(unresolved, /Model: `@smol` \(not resolved/, "an unresolved seat must not claim a model");
+
+  // A concrete pin records `modelResolved` only when the resolution differs
+  // from it, so a pin that resolved to itself must not read as a failure.
+  const pinned = agentMarkdown(plan, { ...scout, model: "xai/grok-4" });
+  assert.match(pinned, /Model: `xai\/grok-4`$/m, "a concrete pin that resolved to itself is not a resolution failure");
+
+  const resolved = agentMarkdown(plan, { ...scout, modelResolved: "minimax/MiniMax-M3" });
+  assert.match(resolved, /Model: `@smol` → resolved to `minimax\/MiniMax-M3`/);
+});
+
 test("an upstream read-only dependency names its path and who writes it", () => {
   const plan = planFor("fix the auth bug");
   const impl = plan.roles.find((r) => r.id === "implementer")!;
   const scoutArtifact = plan.roles.find((r) => r.id === "scout")!.artifact;
 
   // The tester waits on the implementer, a read-only dep waits on the scout.
-  const tester = { ...plan.roles.find((r) => r.id === "tester")!, depends_on: ["scout"] };
+  const tester = { ...plan.roles.find((r) => r.id === "tester")!, dependsOn: ["scout"] };
   const body = agentMarkdown(plan, tester);
 
   assert.ok(body.includes("## Upstream artifacts"), "the section must be present");
@@ -554,7 +934,7 @@ test("the gate refuses a malformed plan and names every issue", () => {
     roles: [
       { ...planFor("fix the auth bug").roles[0], id: "scout", acceptance: [] },
       { ...planFor("fix the auth bug").roles[0], id: "scout", artifact: "" },
-      { ...planFor("fix the auth bug").roles[0], id: "docs", depends_on: ["ghost"] },
+      { ...planFor("fix the auth bug").roles[0], id: "docs", dependsOn: ["ghost"] },
     ],
     notes: [],
   };
@@ -661,16 +1041,16 @@ test("a vision seat asks for the host's default advisor, not a model pattern", a
 
 test("a dependency cycle is dispatched sequentially, not as one parallel batch", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-cycle-"));
-  const role = (id: string, depends_on: string[]): RoleSpec => ({
+  const role = (id: string, dependsOn: string[]): RoleSpec => ({
     id,
     title: id,
     mission: "m",
     acceptance: ["a finding with file:line"],
     core: "implementer",
-    depends_on,
+    dependsOn,
     tools: ["read"],
     effort: "low",
-    needs_vision: false,
+    needsVision: false,
     artifact: join(dir, `${id}.md`),
     model: "@task",
   });
@@ -692,7 +1072,7 @@ test("an audit-shaped council plan survives the gate", () => {
   });
   const errors = validatePlan(plan);
   assert.deepEqual(errors, [], `the audit thinning left dangling edges: ${errors.join("; ")}`);
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3);
 });
 
@@ -702,7 +1082,7 @@ test("dependents follow the specialist that replaced the implementer", () => {
   assert.ok(ids.has("migration-runner"), "the migration specialist must be in the plan");
   assert.ok(!ids.has("implementer"), "the specialist replaced the generic implementer");
   for (const role of plan.roles) {
-    for (const dep of role.depends_on ?? []) {
+    for (const dep of role.dependsOn ?? []) {
       assert.ok(ids.has(dep), `${role.id} still waits on the removed ${dep}`);
     }
   }
@@ -778,4 +1158,120 @@ test("the run directory exists as soon as agents are emitted", async () => {
   for (const role of result.plan!.roles) {
     await stat.access(dirname(role.artifact));
   }
+});
+
+test("the dispatch tells the orchestrator where to place read-only reports", async () => {
+  // B: a read-only seat is told its report "belongs at <artifact>, and the
+  // orchestrator writes it there", and every downstream brief points at that same
+  // path — but nothing ever said this to the orchestrator. The instruction lived
+  // in a brief the main model never reads, so the dependency edge the pipeline
+  // itself created resolved to a file that only appeared if the parent guessed.
+  // Observed directly: a run directory with five agent files and no report in it.
+  const dir = await mkdtemp(join(tmpdir(), "rf-channel-"));
+  const result = await runRoleFleet({
+    task: "review the auth module for security issues",
+    cwd: dir,
+    models: ["xai/grok-4", "zai/glm-5"],
+  });
+  assert.equal(result.ok, true);
+
+  const dispatch = renderDispatch(result.groups, result.agentDir!);
+  assert.match(dispatch, /Read-only seats cannot write their artifact/, "the channel must be stated");
+  // Every read-only seat's declared path is named, so there is nothing to infer.
+  const readOnly = result.agents.filter((a) => !a.writesOwnReport);
+  assert.ok(readOnly.length, "a review plan must contain a read-only seat");
+  for (const seat of readOnly) {
+    assert.ok(
+      dispatch.includes(seat.artifact),
+      `${seat.role}'s artifact path is missing from the dispatch:\n${dispatch.slice(0, 500)}`,
+    );
+  }
+  // And a seat that does hold write is not in the list — it writes its own file.
+  for (const writer of result.agents.filter((a) => a.writesOwnReport)) {
+    const line = dispatch.split("\n").find((l) => l.includes(writer.artifact));
+    assert.ok(!line || !/read-only/i.test(line), `${writer.role} listed as read-only while it holds write`);
+  }
+});
+
+test("the agent-file prune orders run ids numerically, like the directory prune", async () => {
+  // E: both prune guards implement one invariant — never delete a file a newer
+  // run is still using — and they compared the same ids two different ways.
+  // `pruneRunDirs` parses the digits and says why; the agent guard used a string
+  // comparison. Across a digit-count boundary (`run-999` vs `run-1000`) the newer
+  // run sorts *older*, so an older run's prune deleted a live run's agent
+  // definition — the exact failure `nextRunId`'s monotonic bump exists to prevent.
+  //
+  // Today's `Date.now()` is 13 digits, so the case cannot arise in production; it
+  // is pinned because the guard is the riskier half of the invariant (it deletes
+  // agent files, not scratch directories) and had no test at all.
+  const dir = await mkdtemp(join(tmpdir(), "rf-order-"));
+  const agents = join(dir, ".omp", "agents");
+  await mkdir(agents, { recursive: true });
+  const written = (runId: string) =>
+    [
+      "---",
+      "name: rf-scout",
+      'description: "x"',
+      "tools: [read]",
+      'model: "@smol"',
+      "thinking-level: high",
+      "---",
+      "",
+      "<!-- role-fleet:generated -->",
+      `<!-- role-fleet:run ${runId} -->`,
+      "",
+      "# body",
+    ].join("\n");
+
+  await writeFile(join(agents, "rf-scout.md"), written("run-1000"), "utf8");
+  const kept = await pruneGeneratedAgents(agents, [], "run-999");
+  assert.deepEqual(kept, [], "a newer run's live agent file was deleted");
+
+  await writeFile(join(agents, "rf-scout.md"), written("run-998"), "utf8");
+  const stale = await pruneGeneratedAgents(agents, [], "run-999");
+  assert.equal(stale.length, 1, "a stale generated file was left behind");
+});
+
+test("a hostile grant list cannot inject frontmatter keys", () => {
+  // R9: `model` went through `yamlString` while `tools` and `thinking-level` were
+  // interpolated raw, safe only because every producer constrained them. The
+  // grant list is a security boundary by this module's own header, so the escape
+  // has to be unconditional — otherwise the next producer that reaches these
+  // values from outside is the injection the line above already defends against.
+  const base = synthesizePlan({ task: "fix the bug", cwd: "/tmp", workDir: "/tmp/w" }).roles[0]!;
+  const role = {
+    ...base,
+    tools: ['read", "x", "model', "evil"],
+    effort: "high\ninjected: true" as never,
+  };
+  const text = agentMarkdown({ task: "t", cwd: "/tmp", roles: [role], notes: [] }, role);
+  const front = text.slice(4, text.indexOf("\n---", 4));
+  assert.ok(!/^injected: true$/m.test(front), "the effort value added a frontmatter key");
+  assert.ok(!/^model: evil/m.test(front), "the grant list broke out of its flow sequence");
+});
+
+test("the returned verdict describes the cast that actually ships", async () => {
+  // C2: the run returned the pre-confirmation gate verdict on the success path
+  // and the post-confirmation one on the failure path, so the same field meant
+  // two different things — and after a confirmation that dropped seats it
+  // reported the reason for a plan nobody ran.
+  const dir = await mkdtemp(join(tmpdir(), "rf-verdict-"));
+  let askedPlan: RolePlan | null = null;
+  const result = await runRoleFleet({
+    task: "fix the auth bug",
+    cwd: dir,
+    confirm: async (plan) => {
+      askedPlan = plan;
+      return new Set(plan.roles.filter((r) => r.id !== "tester").map((r) => r.id));
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.ok(askedPlan, "the confirmation must have been asked");
+  assert.ok(!result.plan!.roles.some((r) => r.id === "tester"), "the dropped seat still shipped");
+  // The verdict is about the shipped cast, and the confirmation is part of it.
+  assert.match(result.verdict.reason, /./);
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("confirmed cast") && n.includes("tester")),
+    `the dropped seat must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
 });

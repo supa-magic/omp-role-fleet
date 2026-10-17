@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { SPECIALISTS, applySpecialists } from "../src/library.ts";
 import { parseProposal, proposeSpecialists, shouldPropose } from "../src/generate.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
-import { planWaves } from "../src/core.ts";
+import { isCouncilMember, planWaves } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { renderDispatch } from "../src/render.ts";
 import { dispatchGroups, emitAgents } from "../src/agents.ts";
@@ -30,8 +30,111 @@ test("UI work earns a designer on @designer", () => {
   const designer = plan.roles.find((r) => r.id === "designer");
   assert.ok(designer, `designer missing; cast is ${ids(plan).join(",")}`);
   assert.equal(designer!.model, "@designer");
-  assert.ok(designer!.depends_on.includes("scout"));
+  assert.ok(designer!.dependsOn.includes("scout"));
   assert.ok(plan.notes.some((n) => n.includes("designer")));
+});
+
+test("a review-only ask mints no writer, even when the task names a UI", () => {
+  // The exact shape that cost a write-capable seat on a code review: the task
+  // text mentions "ui" (host UI, a file named render.ts, anything), and the
+  // specialist tier answered by adding a designer holding `edit`.
+  const plan = synthesizePlan({
+    task: "review the code, its tests, and the UI in render.ts",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+    reviewOnly: true,
+    council: 3,
+  });
+  assert.ok(!plan.roles.some((r) => r.id === "designer"), `designer joined a review: ${ids(plan).join(",")}`);
+  assert.ok(!plan.roles.some((r) => r.id === "implementer"), "a review must not implement");
+  assert.ok(!plan.roles.some((r) => r.id === "tester"), "a review must not test");
+  // Nothing in the plan can write a source file.
+  for (const role of plan.roles) {
+    assert.ok(!role.tools.includes("edit"), `${role.id} must not hold edit`);
+    assert.ok(!role.tools.includes("write"), `${role.id} must not hold write`);
+  }
+  assert.ok(plan.roles.some((r) => isCouncilMember(r.id)), "the council is still the point");
+  assert.ok(plan.notes.some((n) => n.includes("review-only")));
+});
+
+test("an explicit review ask is a signal without any review word", async () => {
+  // Nothing in this prose says "review" or "audit", and "render.ts" hits the
+  // image hint — the exact combination that minted a write-capable designer
+  // into a council review. Naming the review models IS the request, so the cast
+  // follows the parameters rather than a guess at the vocabulary.
+  // Through the pipeline, which is where a named list becomes a council: this
+  // call is exactly `--models (a,b) --consul c` from the command line.
+  const plan = (
+    await runRoleFleet({
+      task: "the auth module in render.ts and its api surface",
+      cwd: await mkdtemp(join(tmpdir(), "rf-struct-")),
+      dryRun: true,
+      models: ["xai/grok-4", "zai/glm-5"],
+      consul: "anthropic/claude-opus-4-6",
+    })
+  ).plan!;
+  assert.ok(!plan.roles.some((r) => r.id === "designer"), `designer joined: ${ids(plan).join(",")}`);
+  assert.ok(!plan.roles.some((r) => r.id === "implementer"), "a named council is not an implementation ask");
+  // Nobody can modify source. `write` is held only by the review seats — and
+  // only because a consul was appointed, so their reports reach the filesystem
+  // for it to read (see the council section in the README).
+  assert.deepEqual(
+    plan.roles.filter((r) => r.tools.includes("edit")).map((r) => r.id),
+    [],
+    "no seat may edit source in a review",
+  );
+  assert.deepEqual(
+    plan.roles.filter((r) => r.tools.includes("write")).map((r) => r.id).sort(),
+    ["consul", "reviewer-c1", "reviewer-c2"],
+    "only the review seats and the consul write, and only their own reports",
+  );
+});
+
+test("a build verb alongside a council keeps the implementation seats", () => {
+  // `--council` on a refactor is a refactor with a review. Without this escape
+  // the structural signal would strip the very seats doing the work.
+  const plan = synthesizePlan({
+    task: "refactor the auth module and its ui",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+    council: 3,
+  });
+  assert.ok(plan.roles.some((r) => r.id === "implementer"), `implementer dropped: ${ids(plan).join(",")}`);
+  assert.ok(plan.roles.some((r) => r.id === "designer"), "UI work still earns its seat when building");
+});
+
+test("an ordinary build run is unaffected by the council default", () => {
+  // The pipeline always passes a council size, 0 for the common case. Treating
+  // "present" as a review ask would drop the implementer from every build.
+  const plan = synthesizePlan({ task: "fix the auth bug", cwd: "/tmp", workDir: "/tmp/w", council: 0 });
+  assert.ok(plan.roles.some((r) => r.id === "implementer"), `implementer dropped: ${ids(plan).join(",")}`);
+});
+
+test("an audit-shaped task with UI wording does not get a writer back", () => {
+  // The audit thinning drops implementer/tester; the specialist tier used to
+  // re-add a designer one line later, defeating it.
+  const plan = synthesizePlan({
+    task: "audit the landing page ui for injection and csrf",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+  });
+  assert.ok(!plan.roles.some((r) => r.id === "implementer"), "the auditor must not be crowded out by a writer");
+  assert.ok(!plan.roles.some((r) => r.id === "designer"), `designer re-added after thinning: ${ids(plan).join(",")}`);
+  assert.ok(plan.roles.some((r) => r.id === "security-auditor"), "the auditor the task asked for is present");
+  assert.ok(plan.notes.some((n) => n.includes("analysis-only plan")));
+});
+
+test("a pure UI task still gets the designer — it is the implementation", () => {
+  // The other side of the rule: a plan with no writer because nobody wrote code
+  // yet is not an analysis plan. Blocking on "does a writer exist" killed this.
+  const plan = synthesizePlan({
+    task: "build a landing page with a pricing section",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+  });
+  const designer = plan.roles.find((r) => r.id === "designer");
+  assert.ok(designer, `designer missing; cast is ${ids(plan).join(",")}`);
+  assert.ok(designer!.tools.includes("write"), "the designer must be able to build the interface");
 });
 
 test("security wording earns a read-only security auditor on @slow", () => {
@@ -82,7 +185,7 @@ test("applySpecialists drops dependencies on roles absent from the plan", () => 
     (id) => id === "reviewer", // scout absent
   );
   const designer = roles.find((r) => r.id === "designer")!;
-  assert.deepEqual(designer.depends_on, []);
+  assert.deepEqual(designer.dependsOn, []);
 });
 
 // ── dynamic tier ──────────────────────────────────────────────────────────────
@@ -132,6 +235,7 @@ test("an invented model, tool, or dependency invalidates the whole proposal", ()
     base.replace('"read"', '"rm -rf"'),          // tool outside the grant
     base.replace('"dependsOn":[]', '"dependsOn":["ghost"]'), // unresolvable dep
     base.replace('"id":"x-auditor"', '"id":"scout"'),        // claims a built-in seat
+    base.replace('"id":"x-auditor"', '"id":"security-auditor"'), // claims a library seat
     "not json at all",
     "[]",
     "1",
@@ -170,7 +274,6 @@ test("a dependency that leaves the plan is reported, not dropped in silence", as
     task: "assess the regulatory exposure of our payment data pipeline",
     cwd: dir,
     dryRun: true,
-    specialist: true,
     maxRoles: 6,
     propose: async () =>
       JSON.stringify([
@@ -181,7 +284,7 @@ test("a dependency that leaves the plan is reported, not dropped in silence", as
 
   const auditor = result.plan!.roles.find((r) => r.id === "ledger-auditor");
   assert.ok(auditor, "the proposal itself is valid and must merge");
-  assert.deepEqual(auditor.depends_on, [], "the unresolvable edge cannot be honoured");
+  assert.deepEqual(auditor.dependsOn, [], "the unresolvable edge cannot be honoured");
   assert.ok(
     result.plan!.notes.some((n) => n.includes("ledger-auditor") && n.includes("implementer")),
     `the severed edge must be reported: ${result.plan!.notes.join(" | ")}`,
@@ -190,8 +293,9 @@ test("a dependency that leaves the plan is reported, not dropped in silence", as
 
 test("asking for the specialist tier on a host without side turns says so", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-noside-"));
-  // `--specialist` on such a host is a silent no-op unless the plan says why.
-  const result = await runRoleFleet({ task: "fix the auth bug", cwd: dir, dryRun: true, specialist: true });
+  // The tier triggers on the task's own wording now — no flag to remember — so a
+  // host that cannot run it has to say so, or the request is silently dropped.
+  const result = await runRoleFleet({ task: "fix the auth bug, bring in a consultant", cwd: dir, dryRun: true });
   assert.equal(result.ok, true);
   assert.ok(
     result.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
@@ -215,10 +319,9 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
   // `validatePlan` refuse the whole plan and destroyed a healthy council run.
   for (const id of ["reviewer-c1", "reviewer-c3"]) {
     const result = await runRoleFleet({
-      task: "review with different providers",
+      task: "review with different providers, bring in a consultant",
       cwd: dir,
       dryRun: true,
-      specialist: true,
       maxRoles: 8,
       propose: await propose(id),
     });
@@ -231,10 +334,9 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
 
   // A non-colliding proposal on the same run still merges.
   const merged = await runRoleFleet({
-    task: "review with different providers",
+    task: "review with different providers, bring in a consultant",
     cwd: dir,
     dryRun: true,
-    specialist: true,
     maxRoles: 8,
     propose: await propose("threat-modeler"),
   });
@@ -271,7 +373,6 @@ test("the pipeline merges an accepted proposal into the plan", async () => {
   const result = await runRoleFleet({
     task: "audit the exotic schema for this specialist task",
     cwd: dir,
-    specialist: true,
     propose: async () => GOOD_REPLY,
   });
   assert.equal(result.ok, true);
@@ -286,7 +387,6 @@ test("a rejected proposal keeps the static cast and notes it", async () => {
   const result = await runRoleFleet({
     task: "audit the exotic schema for this specialist task",
     cwd: dir,
-    specialist: true,
     propose: async () => "garbage reply, no json",
   });
   assert.equal(result.ok, true);
@@ -299,7 +399,6 @@ test("no proposer means the tier never runs", async () => {
   const result = await runRoleFleet({
     task: "audit the exotic schema for this specialist task",
     cwd: dir,
-    specialist: true,
   });
   assert.equal(result.ok, true);
   assert.ok(!result.plan!.notes.some((n) => n.includes("specialist proposal")));
@@ -313,28 +412,28 @@ test("a council replaces the reviewer with distinct-alias members in one wave", 
     workDir: "/tmp/w",
     council: 3,
   });
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3);
   assert.ok(!plan.roles.some((r) => r.id === "reviewer"), "single reviewer must be replaced");
   const models = members.map((m) => m.model);
   assert.equal(new Set(models).size, 3, `aliases not distinct: ${models.join(",")}`);
   assert.ok(models.includes("@slow") && models.includes("@task") && models.includes("@plan"));
   // All members review the same upstream and share a wave.
-  for (const m of members) assert.deepEqual(m.depends_on, ["implementer"]);
+  for (const m of members) assert.deepEqual(m.dependsOn, ["implementer"]);
   const waves = planWaves(plan.roles);
   const councilWave = waves.findIndex((w) => w.some((r) => r.id === "reviewer-c1"));
-  assert.equal(waves[councilWave].filter((r) => /^reviewer-c\d$/.test(r.id)).length, 3);
+  assert.equal(waves[councilWave].filter((r) => isCouncilMember(r.id)).length, 3);
   assert.ok(plan.notes.some((n) => n.startsWith("council of 3")));
 });
 
 test("a council is capped by the alias pool", () => {
   const plan = synthesizePlan({ task: "fix the bug", cwd: "/tmp", workDir: "/tmp/w", council: 9 });
-  assert.equal(plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id)).length, 3);
+  assert.equal(plan.roles.filter((r) => isCouncilMember(r.id)).length, 3);
 });
 
 test("council members carry independent missions and separate artifacts", () => {
   const plan = synthesizePlan({ task: "fix the bug", cwd: "/tmp", workDir: "/w", council: 2 });
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   const artifacts = members.map((m) => m.artifact);
   assert.equal(new Set(artifacts).size, 2);
   for (const m of members) assert.match(m.mission, /Independent pass/);
@@ -351,7 +450,7 @@ test("council wording in the task auto-triggers three reviewers", async () => {
     task: "fix the auth bug, then review with different providers",
     cwd: dir,
   });
-  const members = result.plan!.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3, "council wording must trigger the council");
 });
 
@@ -362,10 +461,10 @@ test("an analysis-only council reviews after the scout", () => {
     workDir: "/tmp/w",
     council: 2,
   });
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   assert.ok(members.length >= 1);
   for (const m of members) {
-    assert.deepEqual(m.depends_on, members[0].depends_on, "council members share one upstream");
+    assert.deepEqual(m.dependsOn, members[0].dependsOn, "council members share one upstream");
   }
 });
 
@@ -379,9 +478,9 @@ test("council wording fires on an analysis-only plan with no reviewer to replace
     workDir: "/tmp/w",
     council: 3,
   });
-  const members = plan.roles.filter((r) => /^reviewer-c\d$/.test(r.id));
+  const members = plan.roles.filter((r) => isCouncilMember(r.id));
   assert.equal(members.length, 3);
-  for (const m of members) assert.deepEqual(m.depends_on, ["scout"]);
+  for (const m of members) assert.deepEqual(m.dependsOn, ["scout"]);
   assert.deepEqual(members.map((m) => m.model).sort(), ["@plan", "@slow", "@task"]);
 });
 
@@ -389,7 +488,7 @@ test("council wording reaches the pipeline from plain task text", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-words-"));
   const result = await runRoleFleet({ task: "view with different providers", cwd: dir, dryRun: true });
   assert.equal(result.ok, true);
-  assert.equal(result.plan!.roles.filter((r) => /^reviewer-c\d$/.test(r.id)).length, 3);
+  assert.equal(result.plan!.roles.filter((r) => isCouncilMember(r.id)).length, 3);
 });
 
 test("dispatch guidance mentions the council only when one ran", async () => {
@@ -419,7 +518,7 @@ test("dispatch items carry roster names and no phantom model field", async () =>
   assert.match(text, /"name": "ReviewerC1 Slow"/);
   // The task tool has no model field; emitting one invites schema errors.
   assert.ok(!text.includes('"model"'));
-  // Roster ids stay within the task tool's 32-character budget.
+  // Roster ids stay within the plugin's 32-character budget.
   for (const m of text.matchAll(/"name": "([^"]+)"/g)) {
     assert.ok(m[1]!.length <= 32, `name too long: ${m[1]}`);
   }
@@ -462,4 +561,98 @@ test("a proposal's seat is derived, never echoed: write tools mean implementer, 
     ]),
   );
   assert.equal(claimer![0].core, "reviewer", "an echoed core must be overwritten by the derived one");
+});
+
+test("a proposed writer cannot enter an analysis-only plan", async () => {
+  // M1: `--review-only` gated the proposal tier, but naming council models or
+  // appointing a consul strips the implementer *without* setting that flag — and
+  // the tier still ran. The sandbox accepts `edit` (legitimate for a build), the
+  // merge applied no intent filter, and the gate has no tools policy, so
+  // `/role-fleet --models (a,b) "review the payment pipeline"` on a host with
+  // side turns shipped a seat holding `edit` under a plan that had just promised
+  // no source changes. `applySpecialists` closes this for the static tier; the
+  // dynamic tier has to close it for itself.
+  const dir = await mkdtemp(join(tmpdir(), "rf-propwriter-"));
+  const result = await runRoleFleet({
+    task: "review the payment pipeline for compliance gaps",
+    cwd: dir,
+    dryRun: true,
+    maxRoles: 8,
+    models: ["xai/grok-4", "zai/glm-5"],
+    propose: async () =>
+      JSON.stringify([
+        { id: "ledger-sweeper", title: "L", mission: "Sweep the ledger", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@slow", dependsOn: [] },
+        { id: "ledger-reader", title: "R", mission: "Read the ledger", acceptance: ["a"], tools: ["read"], effort: "low", model: "@task", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    !result.plan!.roles.some((r) => r.id === "ledger-sweeper"),
+    "a proposed edit holder merged into a plan that must not write",
+  );
+  assert.ok(
+    result.plan!.roles.some((r) => r.id === "ledger-reader"),
+    "refusing the writer must not throw away the whole tier",
+  );
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("ledger-sweeper") && n.includes("analysis-only")),
+    `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !result.plan!.roles.some((r) => r.tools.includes("edit")),
+    `an edit holder survived: ${result.plan!.roles.filter((r) => r.tools.includes("edit")).map((r) => r.id).join(",")}`,
+  );
+});
+
+test("a build plan still accepts a proposed writer", async () => {
+  // The counterpart, so the guard above is an intent rule and not a blanket ban:
+  // with an implementer in the cast, a proposed writer is allowed.
+  const dir = await mkdtemp(join(tmpdir(), "rf-propok-"));
+  const result = await runRoleFleet({
+    task: "fix the auth bug and add a regression test, bring in a consultant",
+    cwd: dir,
+    dryRun: true,
+    maxRoles: 8,
+    propose: async () =>
+      JSON.stringify([
+        { id: "crypto-hander", title: "C", mission: "Hand the keys", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.plan!.roles.some((r) => r.id === "crypto-hander"),
+    `a legitimate proposed writer was refused: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("--review-only on a capable host does not claim the tier is missing", async () => {
+  // C: the "specialist tier unavailable on this host" note is a statement about
+  // the *machine*. `--review-only` suppresses the tier by choice, and the
+  // else-branch only re-checked the task wording — so every review-only run on a
+  // host that does have side turns told the user their host could not do the
+  // thing it had just been turned off from doing.
+  const dir = await mkdtemp(join(tmpdir(), "rf-reviewnote-"));
+  const result = await runRoleFleet({
+    task: "review the auth module for security issues and report findings",
+    cwd: dir,
+    dryRun: true,
+    reviewOnly: true,
+    propose: async () => "[]",
+  });
+  assert.ok(
+    !result.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `a suppressed tier was reported as missing: ${result.plan!.notes.join(" | ")}`,
+  );
+
+  // The same run without a proposer still says it: there the host genuinely
+  // cannot run the tier, which is the only case the note exists for.
+  const noHost = await runRoleFleet({
+    task: "review the auth module for security issues and report findings",
+    cwd: dir,
+    dryRun: true,
+  });
+  assert.ok(
+    noHost.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `a host without side turns must still be told: ${noHost.plan!.notes.join(" | ")}`,
+  );
 });

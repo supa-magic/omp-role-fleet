@@ -12,9 +12,10 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { GateVerdict, Fleet, RolePlan, RoleSpec } from "./core.ts";
 import { planWaves } from "./core.ts";
-import { synthesizePlan } from "./synthesize.ts";
+import { mergeProposals, synthesizePlan } from "./synthesize.ts";
 import { proposeSpecialists, shouldPropose, type RoleProposer } from "./generate.ts";
 import { gatePlan } from "./gate.ts";
+import { filterToSeats } from "./confirm.ts";
 import { dispatchGroups, emitAgents, pruneRunDirs, type DispatchGroup, type EmittedAgent } from "./agents.ts";
 
 /** Run directories kept under `<repo>/.role-fleet/`. Enough for a multi-wave
@@ -84,12 +85,32 @@ export interface RunOptions {
   maxRoles?: number;
   /** Explicit allowlist path; defaults to `ROLE_FLEET_ALLOWLIST` when set. */
   allowlist?: string;
-  /** Force the dynamic specialist tier regardless of the heuristic. */
-  specialist?: boolean;
   /** Review council size (default 3 when triggered). */
   council?: number;
+  /**
+   * Explicit review models, in order. Two or more imply a council; a single one
+   * retargets the reviewer the plan already has.
+   */
+  models?: string[];
+  /** Model that reconciles the council's reports; absent = the session model. */
+  consul?: string;
+  /** Scout + review seats only; suppresses the code cast and the proposal tier. */
+  reviewOnly?: boolean;
   /** Cheap model call for the dynamic tier; injected, absent = static only. */
   propose?: RoleProposer;
+  /**
+   * Resolve a selector or alias to the concrete `provider/id` it runs on.
+   * Injected from the host (`ctx.models.resolve`) and absent = roles keep the
+   * alias only. Display-only: `bindFleet` and the gate still reason about the
+   * pinned selector.
+   */
+  resolveModel?: (spec: string) => string | undefined;
+  /**
+   * Ask before anything is written or dispatched. Receives the approved plan
+   * and returns the seat ids to keep, or `null` to abandon the run. Absent — or
+   * a host with no interactive UI — dispatches without asking.
+   */
+  confirm?: (plan: RolePlan) => Promise<ReadonlySet<string> | null>;
 }
 
 export interface RunResult {
@@ -100,6 +121,14 @@ export interface RunResult {
   groups: DispatchGroup[];
   agentDir: string | null;
   ok: boolean;
+  /**
+   * The user said no at the confirmation dialog.
+   *
+   * Not a failure: nothing broke and nothing is wrong with the plan. Rendering it
+   * through the error channel reports a considered decision as a plugin fault, so
+   * the surface asks for an info-level notice instead.
+   */
+  abandoned?: boolean;
 }
 
 /**
@@ -135,14 +164,24 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // A council is worth its cost when the user asks for it or the task says
   // "council"/"different providers" explicitly; otherwise one reviewer stands.
   const councilWords = /\b(council|different (models|providers)|multi-model|cross-model)\b/i;
-  const council = opts.council ?? (councilWords.test(opts.task) ? 3 : 0);
+  // A named list is itself the ask for several eyes: `--models a,b` with no
+  // `--council` runs exactly two reviewers, because one reviewer per named model
+  // is what the list means — padding it to the default three would spend runs
+  // the user never asked for on models they did not name.
+  const council =
+    opts.council ??
+    (opts.models?.length ? opts.models.length : councilWords.test(opts.task) ? 3 : 0);
+  const councilSize = Math.max(council, opts.models?.length ?? 0);
 
   let plan = synthesizePlan({
     task: opts.task,
     cwd: opts.cwd,
     workDir: join(opts.cwd, ".role-fleet", runId),
     maxRoles: opts.maxRoles,
-    council,
+    council: councilSize,
+    ...(opts.models?.length ? { models: opts.models } : {}),
+    ...(opts.consul ? { consul: opts.consul } : {}),
+    ...(opts.reviewOnly ? { reviewOnly: true } : {}),
   });
   // The run id travels with the plan: the agent files carry it, so a later run
   // can tell "stale file from a finished run" from "file a concurrent run is
@@ -152,59 +191,36 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // Dynamic tier: when the static cast is clearly thin for this task, one
   // cheap call may propose specialists. Any doubt keeps the static cast —
   // the proposal is an upgrade, never a dependency.
-  if (opts.propose) {
-    const analysisOnly = !plan.roles.some((r) => r.id === "implementer");
-    if (opts.specialist || shouldPropose(opts.task, analysisOnly)) {
+  // A review-only ask is explicit about its cast, so the proposal tier is off:
+  // a model proposing extra specialists would add seats the user just ruled
+  // out, and a proposed writer in a plan that must not write is the exact hole
+  // `applySpecialists` now closes for the static tier.
+  //
+  // Whether the cast holds a writer is read once, here, for both branches: the
+  // merge below can strip roles, so recomputing it further down would answer a
+  // different question than the one the merge was asked.
+  const analysisOnly = !plan.roles.some((r) => r.id === "implementer");
+  if (opts.propose && !opts.reviewOnly) {
+    if (shouldPropose(opts.task, analysisOnly)) {
       const proposed = await proposeSpecialists(opts.task, opts.propose);
       if (!proposed?.length) {
         plan.notes.push("specialist proposal rejected — static cast kept");
       } else {
-        const base = new Set(plan.roles.map((r) => r.id));
-        // A proposal may not claim an id the plan already uses. The parser
-        // refuses the static cast and the hand-written specialists, but the
-        // council mints `reviewer-c1`… at synthesis time, so a proposal could
-        // still collide — and `validatePlan` would then refuse the *whole plan*,
-        // destroying a healthy run over one bad proposal. The proposal is the
-        // optional part; it is the one that goes.
-        const colliding = proposed.filter((r) => base.has(r.id)).map((r) => r.id);
-        if (colliding.length) {
-          plan.notes.push(`specialist proposal rejected — id already in use: ${colliding.join(", ")}`);
-        } else {
-          // The cap is a fan-out control, not a per-tier one: the static cast is
-          // already trimmed, and without re-applying it here `--max-roles 2
-          // --specialist` would ship a static cast plus three proposals.
-          const slots = Math.max(0, (opts.maxRoles ?? 4) - plan.roles.length);
-          const kept = proposed.slice(0, slots);
-          const dropped = proposed.slice(slots).map((r) => r.id);
-          // A proposed dependency on a seat the plan does not contain cannot
-          // be honoured. Dropping it silently makes the role run earlier than
-          // the proposal asked for — every other drop in this pipeline is
-          // reported, so this one is too.
-          const severed: string[] = [];
-          const merged = [...plan.roles, ...kept.map((r) => {
-            const depends_on = r.depends_on.filter((d) => base.has(d) || kept.some((p) => p.id === d));
-            for (const droppedDep of r.depends_on.filter((d) => !depends_on.includes(d))) {
-              severed.push(`${r.id} → ${droppedDep}`);
-            }
-            return { ...r, artifact: `${join(opts.cwd, ".role-fleet", runId, r.id)}.md`, depends_on };
-          })];
-          if (kept.length) {
-            plan.notes.push(`generated specialists: ${kept.map((r) => r.id).join(", ")}`);
-          }
-          if (dropped.length) {
-            plan.notes.push(`role cap ${opts.maxRoles ?? 4}: dropped ${dropped.join(", ")}`);
-          }
-          if (severed.length) {
-            plan.notes.push(`dependency left the plan, role now waits on its remaining deps: ${severed.join(", ")}`);
-          }
-          plan = { ...plan, roles: merged };
-        }
+        plan = mergeProposals(plan, proposed, {
+          artifactDir: join(opts.cwd, ".role-fleet", runId),
+          maxRoles: opts.maxRoles,
+          analysisOnly,
+        });
       }
     }
-  } else if (opts.specialist) {
-    // Asked for explicitly and cannot run: a host without side turns makes
-    // `--specialist` a silent no-op, so the user is told rather than left
-    // wondering why the extra roles never appeared.
+  } else if (!opts.reviewOnly && shouldPropose(opts.task, analysisOnly)) {
+    // The task asks for specialists and this host has no side turns, so the tier
+    // cannot run. Saying so beats a silent skip: the user asked for something the
+    // plan is quietly not going to do.
+    //
+    // `--review-only` is excluded because this is a statement about the *host*.
+    // A run that suppressed the tier by flag has a host that could run it, and
+    // reporting a missing capability there describes the machine incorrectly.
     plan.notes.push("specialist tier unavailable on this host — static cast kept");
   }
 
@@ -212,11 +228,90 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   if (!gate.ok || !gate.plan) {
     return { plan: null, verdict: gate.verdict, waves: [], agents: [], groups: [], agentDir: null, ok: false };
   }
+  // Follows the plan: the confirmation re-gates, and the verdict must describe the
+  // cast that actually ships rather than the one that was proposed.
+  let verdict = gate.verdict;
 
-  const approved = gate.plan;
+  let approved = gate.plan;
+  if (fleet && opts.models?.length) {
+    // Both retarget the review seats. Binding already ran, so the file wins for
+    // the seats it describes; saying so beats a plan whose models silently
+    // differ from the ones the user typed.
+    approved.notes.push(`--models overridden by the allowlist for the seats it describes`);
+  }
+
+  // Resolve aliases before anything is shown to anyone. A confirmation screen
+  // that lists `@slow — unresolved` for every seat is answering the question
+  // "who is answering" with the one string that cannot: asking first and
+  // resolving after meant the dialog could only ever print aliases, which is
+  // exactly what it is for. Binding has already run, so an allowlist selector
+  // and an `@slow` alias both land here, and the host's own resolution is the
+  // only authority on which provider answered. A selector that resolves to
+  // nothing stays unresolved rather than being reported as a guess.
+  const resolved = opts.resolveModel
+    ? {
+        ...approved,
+        roles: approved.roles.map((r) => {
+          const concrete = opts.resolveModel!(r.model);
+          return concrete && concrete !== r.model ? { ...r, modelResolved: concrete } : r;
+        }),
+      }
+    : approved;
+  approved = resolved;
+
+  // Confirmation happens here: after the gate has approved the shape and the
+  // models are known, before any file is written and before the main model is
+  // told to dispatch. A seat the user removes takes its dependents with it, and
+  // the plan is re-validated so a confirmation can never emit something the gate
+  // would have refused.
+  //
+  // A dry run asks nothing: it writes no file and dispatches nothing, so the
+  // dialog is pure friction — and declining one reported a plugin failure for a
+  // run that was never going to happen. `--dry-run` means "show me the cast
+  // without asking", and asking there contradicts the flag.
+  if (opts.confirm && !opts.dryRun) {
+    const chosen = await opts.confirm(approved);
+    if (chosen === null) {
+      return {
+        plan: null,
+        verdict: {
+          verdict: "reject",
+          reason: "run abandoned at confirmation",
+          issues: ["no seats were dispatched"],
+        },
+        waves: [],
+        agents: [],
+        groups: [],
+        agentDir: null,
+        ok: false,
+        abandoned: true,
+      };
+    }
+    const kept = filterToSeats(approved.roles, chosen);
+    const dropped = approved.roles.filter((r) => !kept.includes(r)).map((r) => r.id);
+    const rechecked = gatePlan({ ...approved, roles: kept });
+    if (!rechecked.ok || !rechecked.plan) {
+      return {
+        plan: null,
+        verdict: rechecked.verdict,
+        waves: [],
+        agents: [],
+        groups: [],
+        agentDir: null,
+        ok: false,
+      };
+    }
+    approved = rechecked.plan;
+    // The verdict travels with the plan it describes. Leaving it on the
+    // pre-confirmation gate would report "static validation passed" for a cast
+    // the user had since changed — and the same field would mean pre-confirm on
+    // the success path and post-confirm on the failure path above.
+    verdict = rechecked.verdict;
+    approved.notes.push(dropped.length ? `confirmed cast: dropped ${dropped.join(", ")}` : "confirmed cast: all seats kept");
+  }
   const waves = planWaves(approved.roles);
   if (opts.dryRun) {
-    return { plan: approved, verdict: gate.verdict, waves, agents: [], groups: [], agentDir: null, ok: true };
+    return { plan: approved, verdict, waves, agents: [], groups: [], agentDir: null, ok: true };
   }
 
   const agentDir = join(opts.cwd, ".omp", "agents");
@@ -226,7 +321,7 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   await pruneRunDirs(join(opts.cwd, ".role-fleet"), runId, RUN_DIR_RETENTION);
   return {
     plan: approved,
-    verdict: gate.verdict,
+    verdict,
     waves,
     agents,
     groups: dispatchGroups(agents),

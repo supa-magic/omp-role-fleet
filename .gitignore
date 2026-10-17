@@ -7,3 +7,7 @@ node_modules/
 
 *.tgz
 .DS_Store
+
+# Editor swap/backup files: they are per-machine state, never part of the repo.
+*.swp
+*.swo

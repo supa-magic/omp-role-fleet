@@ -14,8 +14,24 @@ import type { Dirent } from "node:fs";
 import { mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec } from "./core.ts";
-import { planWaves } from "./core.ts";
+import { AGENT_PREFIX, SEAT_PURPOSE, planWaves } from "./core.ts";
+
 import { SPECIALIST_DESCRIPTIONS } from "./library.ts";
+
+/**
+ * Ordering for run ids, in one place.
+ *
+ * Both prune guards — "is this agent file owned by a newer run?" and "which run
+ * directories are stale?" — reason about the same ids and must agree, because
+ * they implement one invariant. Comparing them as strings made the agent guard
+ * disagree with the directory guard across a digit-count boundary (`run-999` vs
+ * `run-1000`): the newer run sorted *older*, and the older run's prune deleted
+ * the newer run's live agent files. Numeric, like the directory side, and like
+ * the comment there already said ordering has to be.
+ */
+export function runIdAt(runId: string): number {
+  return Number(/^run-(\d+)$/.exec(runId)?.[1] ?? Number.NaN);
+}
 
 /** Marks a file as plugin-generated so stale runs can be pruned safely. */
 const GENERATED_MARKER = "<!-- role-fleet:generated -->";
@@ -29,15 +45,9 @@ function runStamp(runId: string | undefined): string {
   return `<!-- role-fleet:run ${runId ?? "run-0"} -->`;
 }
 
-/**
- * Prefix for every generated agent name.
- *
- * omp resolves an agent by name with project definitions replacing bundled
- * ones, so emitting `scout.md` would silently swap the bundled scout for this
- * plan's mission text for the whole session. Namespaced `rf-*` names keep the
- * generated seats and the bundled specialists independent.
- */
-const AGENT_PREFIX = "rf-";
+// `AGENT_PREFIX` is defined once in core.ts: the settled-result observer
+// matches generated names by the same prefix, and a private copy here could
+// drift without either side noticing.
 
 /**
  * YAML-safe scalar: quoted, with backslashes and quotes escaped.
@@ -58,14 +68,60 @@ function yamlString(value: string): string {
  * the frontmatter, a newline splits the scalar. The mission and the task
  * belong to the body, which is plain markdown and safe.
  */
-const SEAT_DESCRIPTION: Record<string, string> = {
-  scout: "Role-fleet investigator: map where the task touches, with file:line evidence. Read-only.",
-  planner: "Role-fleet planner: turn the investigation into a locked implementation plan. Read-only.",
-  implementer: "Role-fleet implementer: execute the locked plan with the smallest correct change.",
-  tester: "Role-fleet tester: run the focused checks and report real output.",
-  reviewer: "Role-fleet reviewer: correctness, scope, and evidence review of the delivered change. Read-only.",
-  "docs-updater": "Role-fleet docs updater: keep user-facing documentation true to shipped behavior.",
-};
+const SEAT_DESCRIPTION: Record<string, string> = Object.fromEntries(
+  Object.entries(SEAT_PURPOSE).map(([seat, purpose]) => [seat, `Role-fleet ${seat}: ${purpose}.`]),
+);
+
+/**
+ * The write authority a seat's own grant gives it, for the agent description.
+ *
+ * Read off `role.tools` rather than a hardcoded list of seat ids. The set said
+ * "read-only" for `reviewer` — and a council member *is* the reviewer seat, so
+ * on a consul run, where members are granted `write` so their reports reach the
+ * consul, the description told the user the exact opposite of the grant in the
+ * very line they would check. Three copies of "who can write" (`core.ts` grants,
+ * `confirm.ts`, and that set) drifted apart; this one now derives from the
+ * single definition.
+ */
+function grantNote(tools: string[]): string {
+  if (tools.includes("edit")) return " Can change code.";
+  if (tools.includes("write")) return " Holds repo-wide write: cannot edit existing files, can create or overwrite any path.";
+  return " Read-only.";
+}
+
+/**
+ * Output schema every generated seat declares.
+ *
+ * `report` is required and carries the complete deliverable; `summary` is a
+ * headline the parent can scan. Without a schema a read-only seat's result
+ * reaches the main model as whatever prose it happened to end with — and a
+ * council then decides on a paragraph instead of on the findings. A required
+ * `report` makes the short answer a non-answer: the host's validator rejects it
+ * and the agent is sent back for the full one.
+ *
+ * There is deliberately no "which model did you run on" field. The subagent
+ * prompt carries no model name, so the only thing a seat could fill it with is
+ * the brief's pinned selector — which a fallback invalidates exactly when it
+ * matters. The real answer is host-side (`model-observed.ts`) and is recorded
+ * from the settled result rather than asked for.
+ */
+const REPORT_SCHEMA_YAML = [
+  "output:",
+  "  properties:",
+  "    summary:",
+  "      type: string",
+  "      metadata:",
+  '        description: "One-paragraph headline of the outcome. Never the deliverable itself."',
+  "    report:",
+  "      type: string",
+  "      metadata:",
+  '        description: "The complete deliverable at full depth: every finding with file:line evidence,',
+  '          per-item detail, tables, and the checks actually run with their real output."',
+  "    verdict:",
+  "      enum: [pass, fail, blocked]",
+  "      metadata:",
+  '        description: "Overall outcome of this seat\'s mission."',
+].join("\n");
 
 function frontmatter(role: RoleSpec): string {
   // Library seats carry their own copy, and a council member is the reviewer
@@ -78,27 +134,56 @@ function frontmatter(role: RoleSpec): string {
     (Object.hasOwn(SPECIALIST_DESCRIPTIONS, role.id) ? SPECIALIST_DESCRIPTIONS[role.id] : undefined) ??
     (Object.hasOwn(SEAT_DESCRIPTION, role.core) ? SEAT_DESCRIPTION[role.core] : undefined) ??
     "Role-fleet generated seat.";
+  // The authority line is appended from the grant, never baked into the static
+  // description above: the description is keyed by seat, and one seat can hold
+  // two different grants across two runs.
+  const described = `${description}${grantNote(role.tools)}`;
   return [
     "---",
     `name: ${AGENT_PREFIX}${role.id}`,
-    `description: ${yamlString(description)}`,
-    `tools: [${role.tools.join(", ")}]`,
+    `description: ${yamlString(described)}`,
+    // `tools` and `thinking-level` go through the same quoting as `model`. Every
+    // producer today constrains them (the grant arrays in core.ts, the effort
+    // enum, the proposal sandbox), so this is not a live hole — but the grant
+    // list is a security boundary per this file's own header, and a producer that
+    // reached these values from outside would otherwise inject frontmatter here
+    // while `model` is defended. Quoting costs nothing and removes the class.
+    `tools: [${role.tools.map(yamlString).join(", ")}]`,
     `model: ${yamlString(role.model)}`,
-    `thinking-level: ${role.effort}`,
+    `thinking-level: ${yamlString(role.effort)}`,
+    // Without this the seat has no `yield` tool and its last assistant turn is
+    // the whole result: a paragraph, trimmed by the parent's own budget, which
+    // is the summary-only failure this schema exists to remove.
+    REPORT_SCHEMA_YAML,
     // `advisor: true` asks the host for its default advisor-role model. The
     // string spelling ("@advisor") is a model pattern instead, and a
     // self-referential one trips the host's cycle guard and silently degrades
     // to the built-in priority list. Vision itself is not a frontmatter key —
     // a vision seat is a seat whose model alias resolves to a vision model.
-    ...(role.needs_vision ? ["advisor: true"] : []),
+    ...(role.needsVision ? ["advisor: true"] : []),
     "---",
     "",
   ].join("\n");
 }
 
+/**
+ * Plan-time resolution note for the seat brief, or "" when the pin already is
+ * the model.
+ *
+ * `modelResolved` is recorded only when the host's resolution differs from the
+ * pin, so a concrete pin that resolved to itself gets no note — the pin already
+ * names the model, and "(not resolved at plan time)" would claim a resolver
+ * failure that did not happen. Only an `@`-alias left unresolved is honestly
+ * "not resolved".
+ */
+function modelNote(model: string, resolved?: string): string {
+  if (resolved) return ` → resolved to \`${resolved}\``;
+  return model.startsWith("@") ? " (not resolved at plan time)" : "";
+}
+
 /** The agent body: mission, task, acceptance bar, and hard constraints. */
 export function agentMarkdown(plan: RolePlan, role: RoleSpec): string {
-  const deps = (role.depends_on ?? []).filter(Boolean);
+  const deps = (role.dependsOn ?? []).filter(Boolean);
   const upstream = deps
     .map((d) => {
       const dep = plan.roles.find((r) => r.id === d);
@@ -125,6 +210,14 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec): string {
     "",
     `# ${role.title}`,
     "",
+    // The pinned selector is the intent; this is what the host resolved it to
+    // at plan time. The seat is told both so a reader knows which model was
+    // asked for. It is NOT asked which model it is running on: the subagent
+    // prompt carries no model name, so the only answer it could give is this
+    // very line — which a fallback has already invalidated. The host reports
+    // the model that actually served the run from the settled result instead.
+    `Model: \`${role.model}\`${modelNote(role.model, role.modelResolved)}`,
+    "",
     "## Mission",
     "",
     role.mission,
@@ -138,21 +231,31 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec): string {
     ...role.acceptance.map((a) => `- [ ] ${a}`),
     "",
     ...(upstream ? ["## Upstream artifacts", "", "Read these before you start:", "", upstream, ""] : []),
+    "## Report contract",
+    "",
+    // The schema is declared in the frontmatter; this is what the fields mean
+    // for this seat. Without it a seat satisfies `report` with one sentence and
+    // the council downstream has nothing to weigh.
+    "- Yield the complete result through the `yield` tool. Your `report` field carries",
+    "  the full deliverable: every finding with `file:line` evidence, per-item detail, the",
+    "  exact commands you ran with their real output, and everything a reader would need to",
+    "  act without re-running your work.",
+    "- `summary` is a headline for the parent to scan — never a shortened copy of the report,",
+    "  and never the deliverable. A parent that reads only `summary` cannot decide anything,",
+    "  so the report must stand on its own.",
+    "- `verdict` is `pass`, `fail`, or `blocked`; `blocked` means you could not finish, and",
+    "  the report must then say exactly what stopped you and what you tried.",
+    "",
     "## Constraints",
     "",
     `- Stay inside your tool grant: ${role.tools.join(", ")}.`,
     "- One writer per file; never edit files owned by another role in this plan.",
     "- Do not expand scope. Smallest correct change.",
     "- Report blockers with evidence. Never invent APIs or claim a check you did not run.",
-    // A role that cannot write must not be told to write. A read-only seat
-    // (scout, reviewer, security-auditor) has no write tool, so an artifact
-    // path in its brief is an instruction it cannot follow — the agent then
-    // reports the blocked path instead of the findings, and the work is lost.
-    // It returns the report; whoever runs the fleet puts it at that path.
     ...(role.tools.some((t) => t === "write" || t === "edit")
-      ? [`- Write your report to \`${role.artifact}\`.`]
+      ? [`- Write your report to \`${role.artifact}\` as well as yielding it: the full report, not a summary.`]
       : [
-          `- You have no write access. Return your report as your final message — it belongs at \`${role.artifact}\`, and the orchestrator writes it there.`,
+          `- You have no write access. Yield your full report — it belongs at \`${role.artifact}\`, and the orchestrator writes it there.`,
         ]),
     "",
   ].join("\n");
@@ -165,8 +268,34 @@ export interface EmittedAgent {
   path: string;
   wave: number;
   model: string;
+  /** Concrete `provider/id` behind `model`, when the host resolved it. */
+  modelResolved?: string;
   artifact: string;
   dependsOn: string[];
+  /**
+   * Whether the seat can write its own artifact.
+   *
+   * False means nobody but the orchestrator places that file, which is a fact
+   * the dispatch prompt has to carry: the seat's own brief promises the path and
+   * cannot keep the promise.
+   */
+  writesOwnReport: boolean;
+}
+
+/**
+ * The `name` an agent file declares in its frontmatter, or "" when it declares none.
+ *
+ * A bounded scan rather than `/^---\n(?:.*\n)*?^name: (.+)$/m`: that lazy nested
+ * quantifier is quadratic in file size, ran over every `.md` in a directory this
+ * plugin does not own, and — because the match can start at the *closing* `---` —
+ * would read a `name:` line out of a hand-written body and then delete that file
+ * on a match. Reading the frontmatter block means the identity check can only
+ * ever see what the host itself would load.
+ */
+function declaredName(body: string): string {
+  const end = body.indexOf("\n---", 3);
+  const front = body.startsWith("---\n") ? (end === -1 ? body : body.slice(0, end)) : "";
+  return /^name: (.+)$/m.exec(front)?.[1]?.trim() ?? "";
 }
 
 /**
@@ -197,10 +326,12 @@ export async function pruneGeneratedAgents(
     try {
       const body = await readFile(target, "utf8");
       if (!body.includes(GENERATED_MARKER)) continue;
-      const declared = body.match(/^---\n(?:.*\n)*?^name: (.+)$/m)?.[1]?.trim();
+      const declared = declaredName(body);
       if (!declared || `${declared}.md` !== entry) continue;
       const owner = body.match(RUN_MARKER)?.[1];
-      if (currentRunId && owner && owner > currentRunId) continue;
+      // Numeric, through the shared comparator — see `runIdAt`. Comparing the
+      // ids as text here made this guard disagree with `pruneRunDirs`.
+      if (currentRunId && owner && runIdAt(owner) > runIdAt(currentRunId)) continue;
       await unlink(target);
       removed.push(target);
     } catch {
@@ -235,17 +366,18 @@ export async function pruneRunDirs(root: string, currentRunId: string, keep: num
   } catch {
     return [];
   }
-  const currentAt = Number(RUN_DIR.exec(currentRunId)?.[1] ?? Number.NaN);
+  const currentAt = runIdAt(currentRunId);
   const runs = entries
     .filter((e) => e.isDirectory() && RUN_DIR.test(e.name))
-    .map((e) => ({ name: e.name, at: Number(RUN_DIR.exec(e.name)![1]) }))
+    .map((e) => ({ name: e.name, at: runIdAt(e.name) }))
     // Numeric, not lexical: ordering must not depend on the epoch's digit count.
+    // Same comparator the agent-file guard uses, so the two halves of the
+    // invariant cannot drift apart again.
     .sort((a, b) => b.at - a.at)
     // Spare the current run and anything newer than it. Ids are strictly
     // increasing (`nextRunId`), so a newer directory belongs to a run still in
-    // flight — the same invariant the agent prune keeps with `owner >
-    // currentRunId`. Without it, one slow run finishing after a burst of eleven
-    // would delete every one of those in-flight artifact directories.
+    // flight. Without it, one slow run finishing after a burst of eleven would
+    // delete every one of those in-flight artifact directories.
     .filter((r) => r.at <= currentAt);
 
   const removed: string[] = [];
@@ -269,10 +401,13 @@ export async function pruneRunDirs(root: string, currentRunId: string, keep: num
  */
 export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAgent[]> {
   await mkdir(dir, { recursive: true });
-  // The plan's artifacts live under the run directory; create it up front so a
-  // worker never inherits a missing parent and an orchestrator reading the plan
-  // does not chase a path that does not exist yet.
-  await mkdir(dirname(plan.roles[0]?.artifact ?? dir), { recursive: true });
+  // The plan's artifacts live under the run directory; create every parent up
+  // front so a worker never inherits a missing one and an orchestrator reading
+  // the plan does not chase a path that does not exist yet. Taking only the
+  // first role's parent held while every artifact shared `workDir`, and would
+  // quietly miss any plan that gave a seat its own directory.
+  const artifactParents = [...new Set(plan.roles.map((r) => dirname(r.artifact)))];
+  await Promise.all(artifactParents.map((parent) => mkdir(parent, { recursive: true })));
   const waves = planWaves(plan.roles);
   const emitted: EmittedAgent[] = [];
 
@@ -284,8 +419,10 @@ export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAg
         path: join(dir, `${AGENT_PREFIX}${role.id}.md`),
         wave: i + 1,
         model: role.model,
+        ...(role.modelResolved ? { modelResolved: role.modelResolved } : {}),
         artifact: role.artifact,
-        dependsOn: [...(role.depends_on ?? [])],
+        dependsOn: [...(role.dependsOn ?? [])],
+        writesOwnReport: role.tools.includes("write") || role.tools.includes("edit"),
       });
     }
   });

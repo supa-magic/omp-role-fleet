@@ -16,6 +16,27 @@
  * to describe the whole world.
  */
 
+/** What a seat is for, keyed by the words the synthesis heuristics match on. */
+export type Capability = "scout" | "plan" | "code" | "test" | "review" | "docs";
+
+/**
+ * The seat id each capability mints.
+ *
+ * In `core` because two modules need it and neither owns it: `synthesizePlan`
+ * drafts its seats from it, and the proposal sandbox (`generate.parseProposal`)
+ * must refuse exactly these ids. A hand-synced copy there is correct only until
+ * this map changes, and the failure is silent — a proposal that claims
+ * `designer` is refused rather than merged.
+ */
+export const CAPABILITY_ID: Record<Capability, string> = {
+  scout: "scout",
+  plan: "planner",
+  code: "implementer",
+  test: "tester",
+  review: "reviewer",
+  docs: "docs-updater",
+};
+
 export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto";
 
 /**
@@ -26,6 +47,66 @@ export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "
  */
 export const READ_TOOLS = ["read", "grep", "glob"];
 export const WRITE_TOOLS = ["read", "grep", "glob", "edit", "write"];
+
+/**
+ * Prefix for every generated agent name.
+ *
+ * omp resolves an agent by name with project definitions replacing bundled
+ * ones, so emitting `scout.md` would silently swap the bundled scout for this
+ * plan's mission text for the whole session. Namespaced `rf-*` names keep the
+ * generated seats and the bundled specialists independent.
+ *
+ * It lives here rather than beside the emitter because the settled-result
+ * observer matches it too: two copies drifting apart would switch the whole
+ * model-observation feature off without a sound.
+ */
+export const AGENT_PREFIX = "rf-";
+
+/**
+ * Default cap on generated roles, when the caller names none.
+ *
+ * One definition, because the cap is a fan-out promise the user reads on the
+ * flag help, the tool schema and the notes: three copies of `4` drift the
+ * moment one of them is changed. `MAX_ROLES` in the extension entry is the hard
+ * ceiling and stays separate — this is the *default*, not the limit.
+ */
+export const DEFAULT_MAX_ROLES = 4;
+
+/**
+ * Council member ids: `reviewer-c1`, `reviewer-c2`, …
+ *
+ * The pattern is matched in five places (council detection, cap exemptions,
+ * roster filtering, dispatch guidance), and a member past the ninth must still
+ * count as a member — hence `\d+`, not `\d`. Council size is bounded by
+ * `MAX_COUNCIL` in the extension entry, so a copy drifting past that would be a
+ * defect; a regex that silently stops matching is the same defect earlier.
+ */
+export function isCouncilMember(id: string): boolean {
+  return /^reviewer-c\d+$/.test(id);
+}
+
+/**
+ * One line per seat, in the words a person uses.
+ *
+ * The seat id is machinery (`reviewer-c1`); this is what the seat is *for*, and
+ * it is the only thing that can make a cast reviewable by a human: "Reviewer 2"
+ * says nothing, "independent review of the change on its own model" says who
+ * is paying and what comes back. Lives here rather than beside the emitter
+ * because three surfaces read it — the agent picker, the cast confirmation, and
+ * the dispatch table — and three copies of the same sentence would drift.
+ */
+export const SEAT_PURPOSE: Record<string, string> = {
+  scout: "maps where the task touches, with file:line evidence",
+  planner: "turns the investigation into a locked implementation plan",
+  implementer: "implements the plan with the smallest correct change",
+  tester: "runs the focused checks and reports their real output",
+  reviewer: "reviews the change for correctness, scope, and evidence",
+  consul: "reconciles the council's reports into one verdict",
+  "docs-updater": "keeps user-facing documentation true to shipped behavior",
+  designer: "builds and polishes the interface, accessibility included",
+  "security-auditor": "audits the surface for vulnerabilities, with evidence",
+  "db-migration-auditor": "reviews the schema change and its rollback path",
+};
 
 /** A model an allowlist can pin to: `selector` names it, `aliases` add lookup
  *  names, `enabled: false` takes it out of every chain. */
@@ -56,14 +137,20 @@ export interface RoleSpec {
   acceptance: string[];
   /** Fleet seat this executes as (documentation and allowlist-mode routing). */
   core: string;
-  depends_on: string[];
+  dependsOn: string[];
   tools: string[];
   effort: Effort;
-  needs_vision: boolean;
+  needsVision: boolean;
   /** Where the worker writes its result. */
   artifact: string;
   /** An omp model selector or role alias such as "@smol". */
   model: string;
+  /**
+   * Concrete `provider/id` resolved from `model` at plan time when the host
+   * can answer. Display-only: frontmatter still pins `model` so role aliases
+   * and host fallback chains keep working. Absent when unresolved.
+   */
+  modelResolved?: string;
 }
 
 export interface RolePlan {
@@ -125,7 +212,7 @@ export function planWaves(roles: RoleSpec[]): RoleSpec[][] {
 
   while (remaining.length) {
     const wave = remaining.filter((r) =>
-      (r.depends_on ?? []).every((d) => done.has(d) || !known.has(d)),
+      (r.dependsOn ?? []).every((d) => done.has(d) || !known.has(d)),
     );
     if (!wave.length) {
       waves.push(remaining.splice(0, remaining.length));
@@ -156,7 +243,7 @@ export function validatePlan(plan: RolePlan): string[] {
     if (!r.model) errors.push(`role ${r.id}: no model`);
     if (!r.acceptance.length) errors.push(`role ${r.id}: no acceptance criteria`);
     if (!r.artifact) errors.push(`role ${r.id}: no artifact path`);
-    for (const d of r.depends_on ?? []) {
+    for (const d of r.dependsOn ?? []) {
       if (!declared.has(d)) errors.push(`role ${r.id}: unknown dependency ${d}`);
     }
   }

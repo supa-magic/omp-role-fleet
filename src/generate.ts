@@ -10,7 +10,8 @@
  * count past the cap.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-import { WRITE_TOOLS } from "./core.ts";
+import { CAPABILITY_ID, WRITE_TOOLS } from "./core.ts";
+import { SPECIALISTS } from "./library.ts";
 
 /** One cheap model call; injected so tests run without a provider. */
 export type RoleProposer = (task: string) => Promise<string>;
@@ -92,10 +93,10 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
     title,
     mission,
     acceptance,
-    depends_on: dependsOn,
+    dependsOn,
     tools: [...new Set(tools)],
     effort,
-    needs_vision: model === "@vision",
+    needsVision: model === "@vision",
     // A real seat, not a literal "task": allowlist mode routes by seat, so a
     // seat no file can name means the role keeps its alias even in a pinned run.
     core: tools.some((t) => t === "edit" || t === "write") ? "implementer" : "reviewer",
@@ -106,17 +107,14 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
 
 /** IDs the proposal must never claim for itself: the static cast, and the
  *  library specialists — a duplicate id makes `validatePlan` reject the whole
- *  plan, so a colliding proposal must not be able to reach the merge at all. */
+ *  plan, so a colliding proposal must not be able to reach the merge at all.
+ *
+ *  The specialist half is derived from `SPECIALISTS` rather than copied: a
+ *  hand-synced list is correct only until the catalog grows, and the failure is
+ *  silent (a proposal that claims `designer` is refused instead of merged). */
 const BASE_CAST = new Set([
-  "scout",
-  "planner",
-  "implementer",
-  "tester",
-  "reviewer",
-  "docs-updater",
-  "designer",
-  "security-auditor",
-  "migration-runner",
+  ...Object.values(CAPABILITY_ID),
+  ...SPECIALISTS.map((s) => s.spec.id),
 ]);
 
 /**
