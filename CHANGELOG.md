@@ -65,8 +65,9 @@ Correctness and post-dispatch ownership.
 - The proposal merge counted the implementer and every council member as zero
   seats, so a full 4/4 build cast merged one specialist and silently shipped five
   roles. It now counts logical seats exactly like the static cap: a slice group
-  and a council group each cost one, the consul is exempt, and any exempt overrun
-  gets the same `role cap N exceeded` note the static pass writes.
+  and a council group each cost one, the consul costs one but is never dropped,
+  and any exempt overrun gets the same `role cap N exceeded` note the static pass
+  writes.
 - An over-closed `--models (a))` list drove the spaced scanner's depth negative,
   made it consume the rest of the line, and echoed the whole task back as a
   malformed model list. The scanner stops at `depth <= 0`, so the error names the

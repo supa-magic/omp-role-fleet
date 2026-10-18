@@ -645,16 +645,15 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
   const maxRoles = Math.max(2, opts.maxRoles ?? DEFAULT_MAX_ROLES);
   // The cap counts logical seats exactly as the static pass does: every plain
   // role costs one, a slice fan-out costs one (only its first seat stands for
-  // the group), and a council costs one (only its first member stands for the
-  // group). The consul is the one exempt seat. Excluding the implementer or
-  // every council member made a full build cast look like it had a free slot,
-  // so a proposal silently shipped five roles at a cap of four.
+  // the group), a council costs one (only its first member stands for the
+  // group), and the consul costs one even though it is never dropped. Excluding
+  // the implementer or every council member made a full build cast look like it
+  // had a free slot, so a proposal silently shipped five roles at a cap of four.
   const firstSliceAt = plan.roles.findIndex((r) => isSliceSeat(r.id));
   const hasCouncil = plan.roles.some((r) => isCouncilMember(r.id));
   const usedSeats =
     plan.roles.filter(
-      (r, i) =>
-        (!isSliceSeat(r.id) || i === firstSliceAt) && !isCouncilMember(r.id) && r.core !== "consul",
+      (r, i) => (!isSliceSeat(r.id) || i === firstSliceAt) && !isCouncilMember(r.id),
     ).length + (hasCouncil ? 1 : 0);
   const slots = Math.max(0, maxRoles - usedSeats);
   const kept = writable.slice(0, slots);

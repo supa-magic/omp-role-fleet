@@ -957,3 +957,30 @@ test("a full default build cast refuses a proposal instead of exceeding the cap"
     `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
   );
 });
+
+test("a consul occupies a merge slot even though it is never dropped", async () => {
+  // The static pass charges the consul one position (`perSeat`) and exempts it
+  // only from dropping. Charging it zero in the merge gave a consul-bearing
+  // plan one more proposal slot than the cap allows.
+  const dir = await mkdtemp(join(tmpdir(), "rf-consulslot-"));
+  const result = await runRoleFleet({
+    task: "review the auth module with a council of different providers and consult a specialist expert",
+    cwd: dir,
+    council: 3,
+    consul: "xai/grok-4",
+    maxRoles: 4,
+    propose: async () =>
+      JSON.stringify([
+        { id: "tuner-a", title: "A", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+        { id: "tuner-b", title: "B", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  const cast = result.plan!.roles.map((r) => r.id);
+  assert.ok(cast.includes("tuner-a"), `the one free slot must merge: ${cast.join(",")}`);
+  assert.ok(!cast.includes("tuner-b"), `the consul did not occupy a slot: ${cast.join(",")}`);
+  assert.ok(
+    result.plan!.notes.some((n) => n.startsWith("role cap 4") && n.includes("tuner-b")),
+    `the dropped proposal must be named: ${result.plan!.notes.join(" | ")}`,
+  );
+});
