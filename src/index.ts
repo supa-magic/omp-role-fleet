@@ -29,17 +29,6 @@ const PLUGIN_VERSION = "1.5.0";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
-interface PlanToolParams {
-  task: string;
-  maxRoles?: number;
-  allowlist?: string;
-  dryRun?: boolean;
-  council?: number;
-  models?: string[];
-  consul?: string;
-  reviewOnly?: boolean;
-  slices?: number;
-}
 
 /**
  * The one `runRoleFleet` call shape both surfaces use.
@@ -554,7 +543,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
         .optional()
         .describe("Fan the implementation out across this many writer seats (implementer-1 … -N)"),
     }),
-    async execute(_toolCallId, params: PlanToolParams, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: Flags & { task: string }, _signal, _onUpdate, ctx) {
       try {
         const progress = startProgress(ctx, ctx.ui, "role-fleet: choosing the cast…");
         let result: RunResult;

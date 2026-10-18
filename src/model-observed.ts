@@ -14,7 +14,7 @@
  * recorded when the run dispatched, so the user gets "planned X, ran Y" instead
  * of a guess.
  */
-import { AGENT_PREFIX } from "./core.ts";
+import { AGENT_PREFIX, baseModel } from "./core.ts";
 
 export interface ExpectedModel {
   /** The selector pinned in the agent file: an alias or a concrete id. */
@@ -111,22 +111,6 @@ export function expectedFor(agent: string): ExpectedModel | undefined {
 export function resetExpectedModels(): void {
   expected = new Map();
   seen.clear();
-}
-
-/**
- * `provider/id:high` → `provider/id`: the suffix is a thinking level, not a model.
- *
- * Matched against the level names rather than by position. Comparing the colon and
- * slash indexes looked equivalent and was not: a selector whose id carries a colon
- * before its slash lost everything after that colon and was compared against a
- * model that never existed — a false divergence report on every settle. A suffix
- * that is not one of the level names is part of the id.
- */
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
-export function baseModel(value: string): string {
-  const colon = value.lastIndexOf(":");
-  if (colon <= 0) return value;
-  return THINKING_LEVELS.includes(value.slice(colon + 1)) ? value.slice(0, colon) : value;
 }
 
 interface SettledRun {

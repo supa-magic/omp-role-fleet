@@ -4,8 +4,7 @@
  * same ceilings: a flag typed by hand must not be the only way to ask for a
  * fan-out the model cannot.
  */
-import { MAX_SLICES } from "./core.ts";
-import { expandHome } from "./pipeline.ts";
+import { expandHome, MAX_SLICES } from "./core.ts";
 
 /** Bounds shared with the `role_fleet_plan` zod schema, so the flag path and
  *  the tool path cannot disagree about what is reachable. */
@@ -249,7 +248,7 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
           }
           collected.push(candidate);
           next++;
-          if (depth === 0) break;
+          if (depth <= 0) break;
         }
         if (!opened || depth !== 0) {
           // Nothing is consumed on a malformed or non-bracketed follower: those

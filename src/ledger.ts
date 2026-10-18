@@ -17,8 +17,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RunOutcome } from "./core.ts";
-import { AGENT_PREFIX } from "./core.ts";
-import { baseModel, expectedFor, readTaskResults } from "./model-observed.ts";
+import { AGENT_PREFIX, baseModel } from "./core.ts";
+import { expectedFor, readTaskResults } from "./model-observed.ts";
 
 export interface PersistResult {
   /** Outcomes newly appended (re-delivered envelopes are ignored). */

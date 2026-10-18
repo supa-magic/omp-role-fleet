@@ -56,8 +56,24 @@ Correctness and post-dispatch ownership.
 - A renamed seat can no longer claim another seat's base filename.
 - `pruneRunDirs` treats its keep count as at least one, so the current run's
   directory always survives.
-- Overwriting or pruning a file owned by another run is reported, in both owner
-  directions, instead of only when the foreign run is newer.
+- Overwriting or pruning a file owned by another run is reported when that run
+  is recent enough to still be in flight (5 minutes), in both owner directions,
+  instead of on every sequential run or only when the foreign run is newer.
+
+### Fixed — live smoke pass
+
+- The proposal merge counted the implementer and every council member as zero
+  seats, so a full 4/4 build cast merged one specialist and silently shipped five
+  roles. It now counts logical seats exactly like the static cap: a slice group
+  and a council group each cost one, the consul is exempt, and any exempt overrun
+  gets the same `role cap N exceeded` note the static pass writes.
+- An over-closed `--models (a))` list drove the spaced scanner's depth negative,
+  made it consume the rest of the line, and echoed the whole task back as a
+  malformed model list. The scanner stops at `depth <= 0`, so the error names the
+  bad token and every task word stays task text.
+- `expandHome` and `baseModel` live in `core.ts` instead of `flags.ts` importing
+  the orchestration graph for a path helper; the tool parameter type reuses
+  `Flags`, and the write-only `emitted`/`dispatched` result fields are gone.
 
 ## 1.4.0
 

@@ -7,15 +7,13 @@
  * `ROLE_FLEET_ALLOWLIST`) pins concrete selectors for every seat the file
  * describes; a seat it does not describe keeps its `@` alias with a note.
  */
-import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { GateVerdict, Fleet, RolePlan, RoleSpec } from "./core.ts";
-import { isCouncilMember, planWaves, VOCAB } from "./core.ts";
+import { baseModel, expandHome, isCouncilMember, planWaves, VOCAB } from "./core.ts";
 import { mergeProposals, isDegenerateCast, synthesizePlan } from "./synthesize.ts";
 import { proposeSpecialists, shouldPropose, type RoleProposer } from "./generate.ts";
 import { gatePlan } from "./gate.ts";
-import { baseModel } from "./model-observed.ts";
 import { filterToSeats } from "./confirm.ts";
 import {
   dispatchGroups,
@@ -30,15 +28,6 @@ import {
 /** Run directories kept under `<repo>/.role-fleet/`. Enough for a multi-wave
  *  run plus recent history, without letting the tree grow without bound. */
 const RUN_DIR_RETENTION = 10;
-
-/** A prompt is not a shell, so `~` arrives literally and `readFile` cannot
- *  resolve it. Exported so the command flag parser expands once, early, and
- *  this is the backstop for every other caller. */
-export function expandHome(path: string | undefined): string | undefined {
-  if (path === undefined) return undefined;
-  if (path === "~") return homedir();
-  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
-}
 
 async function loadAllowlist(path: string): Promise<Fleet> {
   // `JSON.parse` reports the offset, not the file: `Unexpected token '}', "{…}"
@@ -158,10 +147,6 @@ export interface RunResult {
    * the surface asks for an info-level notice instead.
    */
   abandoned?: boolean;
-  /** Agent files were written. False for a dry run and for a rejected plan. */
-  emitted?: boolean;
-  /** The dispatch callback ran and returned without throwing. */
-  dispatched?: boolean;
   /** Why the dispatch callback failed, when it did. */
   dispatchError?: string;
 }
@@ -472,17 +457,15 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
     groups: dispatchGroups(agents),
     agentDir,
     ok: true,
-    emitted: true,
   };
   if (opts.onDispatch) {
     try {
       await opts.onDispatch(result);
-      return { ...result, dispatched: true };
+      return result;
     } catch (err) {
       return {
         ...result,
         ok: false,
-        dispatched: false,
         dispatchError: err instanceof Error ? err.message : String(err),
       };
     }

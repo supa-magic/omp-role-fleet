@@ -931,4 +931,29 @@ test("a council plan still leaves a proposal slot", async () => {
     result.plan!.roles.some((r) => r.id === "threat-modeler"),
     `the council consumed every slot: ${result.plan!.notes.join(" | ")}`,
   );
+  assert.ok(
+    result.plan!.notes.some((n) => n === "role cap 4 exceeded: 5 roles (council members, slice seats and the consul are exempt)"),
+    `the exempt overrun must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a full default build cast refuses a proposal instead of exceeding the cap", async () => {
+  // The merge used to charge the implementer zero seats, so a full 4/4 build
+  // cast looked like it had one free slot and silently shipped five roles.
+  const dir = await mkdtemp(join(tmpdir(), "rf-fullcap-"));
+  const result = await runRoleFleet({
+    task: "fix the auth bug with a specialist expert",
+    cwd: dir,
+    propose: async () =>
+      JSON.stringify([
+        { id: "extra-reader", title: "R", mission: "Read", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.plan!.roles.length, 4, `cap 4 shipped ${result.plan!.roles.length} roles`);
+  assert.ok(!result.plan!.roles.some((r) => r.id === "extra-reader"), "a proposal entered a full cast");
+  assert.ok(
+    result.plan!.notes.some((n) => n.startsWith("role cap 4") && n.includes("extra-reader")),
+    `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
 });

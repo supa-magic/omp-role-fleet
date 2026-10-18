@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 /**
  * Types and pure logic for dynamic role plans.
  *
@@ -452,6 +455,34 @@ export function validatePlan(plan: RolePlan): string[] {
  * trailing space or a different slash spelling must resolve, not silently fall
  * through to "seat not in allowlist" and leave an alias in a pinned run.
  */
+/**
+ * `~` in a path that arrives from a prompt, a flag, or an env var.
+ *
+ * A prompt is not a shell, so `~` arrives literally and `readFile` cannot
+ * resolve it. One implementation for the flag parser, the pipeline backstop and
+ * the command surface; living in the domain kernel keeps `flags.ts` from
+ * importing the whole orchestration graph for four lines.
+ */
+export function expandHome(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  if (path === "~") return homedir();
+  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+/** Thinking-level names that may suffix a concrete model: `provider/id:high`. */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+
+/**
+ * `provider/id:high` → `provider/id`: the suffix is a thinking level, not part
+ * of the model identity. Used by both the ledger and the observer, so the two
+ * cannot disagree about whether a seat changed models.
+ */
+export function baseModel(value: string): string {
+  const colon = value.lastIndexOf(":");
+  if (colon <= 0) return value;
+  return THINKING_LEVELS.includes(value.slice(colon + 1)) ? value.slice(0, colon) : value;
+}
+
 export function normalizeSeat(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }

@@ -976,6 +976,14 @@ test("--models never eats a word that is not bracketed", () => {
   assert.equal(cut.flags.models, undefined);
   assert.match(cut.problems[0] ?? "", /unbalanced bracket list/);
   assert.equal(cut.task, "fix the bug");
+
+  // The spaced scanner used to stop only at depth 0, so an over-closed list
+  // drove the depth negative and it consumed the rest of the line — then echoed
+  // the user's whole task back as if it were a malformed model list.
+  const overClosed = parseFlags(["--models", "(a))", "fix", "the", "login", "bug"]);
+  assert.equal(overClosed.flags.models, undefined);
+  assert.equal(overClosed.task, "(a)) fix the login bug", "nothing the user typed may disappear");
+  assert.ok(!(overClosed.problems[0] ?? "").includes("login"), `the task was echoed as a model list: ${overClosed.problems[0]}`);
 });
 
 test("--models=(a, b) finishes the list the host split in two", () => {

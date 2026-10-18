@@ -642,14 +642,20 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
   // already trimmed, and without re-applying it here `--max-roles 2` on a
   // task that triggers the proposal tier would ship a static cast plus
   // three proposals on top of it.
-  const maxRoles = opts.maxRoles ?? DEFAULT_MAX_ROLES;
-  // The cap counts seats the same way the static pass does: the implementer,
-  // the consul and the council/slice seats are one logical seat each and are
-  // exempt. Counting them here made a council run consume every slot, so a paid
-  // proposal could never merge into the one plan shape that asks for it.
-  const capsAsOneSeat = (r: RoleSpec): boolean =>
-    r.core === "implementer" || r.core === "consul" || isCouncilMember(r.id) || isSliceSeat(r.id);
-  const usedSeats = plan.roles.filter((r) => !capsAsOneSeat(r)).length;
+  const maxRoles = Math.max(2, opts.maxRoles ?? DEFAULT_MAX_ROLES);
+  // The cap counts logical seats exactly as the static pass does: every plain
+  // role costs one, a slice fan-out costs one (only its first seat stands for
+  // the group), and a council costs one (only its first member stands for the
+  // group). The consul is the one exempt seat. Excluding the implementer or
+  // every council member made a full build cast look like it had a free slot,
+  // so a proposal silently shipped five roles at a cap of four.
+  const firstSliceAt = plan.roles.findIndex((r) => isSliceSeat(r.id));
+  const hasCouncil = plan.roles.some((r) => isCouncilMember(r.id));
+  const usedSeats =
+    plan.roles.filter(
+      (r, i) =>
+        (!isSliceSeat(r.id) || i === firstSliceAt) && !isCouncilMember(r.id) && r.core !== "consul",
+    ).length + (hasCouncil ? 1 : 0);
   const slots = Math.max(0, maxRoles - usedSeats);
   const kept = writable.slice(0, slots);
   const dropped = writable.slice(slots).map((r) => r.id);
@@ -676,6 +682,13 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
   }
   if (severed.length) {
     plan.notes.push(`dependency left the plan, role now waits on its remaining deps: ${severed.join(", ")}`);
+  }
+  // The static pass already reports an exempt overrun; a merge can add a seat
+  // after that note was written, so the final cast gets the same sentence.
+  if (merged.length > maxRoles) {
+    plan.notes.push(
+      `role cap ${maxRoles} exceeded: ${merged.length} roles (council members, slice seats and the consul are exempt)`,
+    );
   }
   return { ...plan, roles: merged };
 }
