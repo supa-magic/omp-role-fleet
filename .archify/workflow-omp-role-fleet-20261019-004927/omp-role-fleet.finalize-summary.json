@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/candidate.json",
+    "sha256": "eddbfafe2b96b5ac4ad7d858136b8c6b2c202c447420cd25e3a5b349bcf9aad0",
+    "bytes": 19298
+  },
+  "artifact": {
+    "path": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.html",
+    "sha256": "b2d639cb519c18a5d1cb2c98d5274d311b641137479b5147c82663f5eda3b8bf",
+    "bytes": 862642
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "fail"
+  },
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/evidence-path-conflict",
+      "severity": "error",
+      "message": "browser-check will not replace the existing unowned evidence path \"/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.browser-check.json\".",
+      "subject": {
+        "artifact": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.html",
+        "evidencePath": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.browser-check.json"
+      },
+      "evidence": {
+        "reason": {
+          "code": "ownership-artifact-mismatch"
+        }
+      },
+      "supportedFixes": [
+        "move the conflicting file aside, or choose a separate --out-dir, then rerun browser-check"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.finalize.json",
+    "summaryReceipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.finalize-summary.json",
+    "browserCheckReceipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-18T09:52:06.869Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 805
+}

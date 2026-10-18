@@ -1,0 +1,1573 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "browser-check",
+  "evidenceKind": "automated-browser",
+  "status": "pass",
+  "visualReview": "not-requested",
+  "provenance": "current",
+  "deliveryReceiptId": "29381a48-e04b-4d3b-bd33-0ac916f61c9a",
+  "artifact": {
+    "path": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261019-004927/omp-role-fleet.html",
+    "sha256": "3b1ad1f788f47eb6648c12ace80ef3da2f276ec4c16146533caf6c2db486432a",
+    "bytes": 861807
+  },
+  "state": {
+    "detail": "read",
+    "motion": "still"
+  },
+  "chrome": {
+    "status": "available",
+    "executable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  },
+  "diagnostics": [],
+  "containment": {
+    "status": "pass",
+    "policy": "fit-or-reader-declared-readable-vertical-scroll",
+    "viewports": [
+      {
+        "width": 1440,
+        "height": 900,
+        "theme": "light",
+        "innerWidth": 1440,
+        "innerHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 2305,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1376,
+        "diagramWidth": 1346,
+        "pageComposition": {
+          "bodyPaddingPx": 12,
+          "headerPx": 52,
+          "diagramChromePx": 78,
+          "svgPx": 2162,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 445,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 444,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 444,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 423,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 228,
+            "spaceAboveNodesPx": 190,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 125,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 74,
+            "spaceAboveNodesPx": 45,
+            "spaceBelowNodesPx": 5
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1600,
+        "height": 1000,
+        "theme": "light",
+        "innerWidth": 1600,
+        "innerHeight": 1000,
+        "scrollWidth": 1600,
+        "scrollHeight": 2628,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1536,
+        "diagramWidth": 1506,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2419,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 498,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 497,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 497,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 474,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 255,
+            "spaceAboveNodesPx": 213,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 140,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 83,
+            "spaceAboveNodesPx": 50,
+            "spaceBelowNodesPx": 6
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "theme": "light",
+        "innerWidth": 1920,
+        "innerHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 3142,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1856,
+        "diagramWidth": 1826,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2933,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 604,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 603,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 603,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 575,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 309,
+            "spaceAboveNodesPx": 258,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 169,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 101,
+            "spaceAboveNodesPx": 61,
+            "spaceBelowNodesPx": 7
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "theme": "light",
+        "innerWidth": 2048,
+        "innerHeight": 1320,
+        "scrollWidth": 2048,
+        "scrollHeight": 3190,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1920,
+        "diagramWidth": 1845,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 68,
+          "diagramChromePx": 94,
+          "svgPx": 2964,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 611,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 609,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 609,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 581,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 312,
+            "spaceAboveNodesPx": 261,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 171,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 102,
+            "spaceAboveNodesPx": 62,
+            "spaceBelowNodesPx": 8
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 44,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      }
+    ]
+  },
+  "themeStates": {
+    "status": "pass",
+    "viewports": [
+      {
+        "width": 1440,
+        "height": 900,
+        "requestedTheme": "light",
+        "resolvedTheme": "light",
+        "ok": true
+      },
+      {
+        "width": 1600,
+        "height": 1000,
+        "requestedTheme": "light",
+        "resolvedTheme": "light",
+        "ok": true
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "requestedTheme": "light",
+        "resolvedTheme": "light",
+        "ok": true
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "requestedTheme": "light",
+        "resolvedTheme": "light",
+        "ok": true
+      },
+      {
+        "width": 1440,
+        "height": 900,
+        "requestedTheme": "dark",
+        "resolvedTheme": "dark",
+        "ok": true
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "requestedTheme": "dark",
+        "resolvedTheme": "dark",
+        "ok": true
+      }
+    ]
+  },
+  "readability": {
+    "status": "pass",
+    "minimumProjectedNodeTextPx": 6,
+    "viewports": [
+      {
+        "width": 1440,
+        "height": 900,
+        "theme": "light",
+        "innerWidth": 1440,
+        "innerHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 2305,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1376,
+        "diagramWidth": 1346,
+        "pageComposition": {
+          "bodyPaddingPx": 12,
+          "headerPx": 52,
+          "diagramChromePx": 78,
+          "svgPx": 2162,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 445,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 444,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 444,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 423,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 228,
+            "spaceAboveNodesPx": 190,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 125,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 74,
+            "spaceAboveNodesPx": 45,
+            "spaceBelowNodesPx": 5
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1600,
+        "height": 1000,
+        "theme": "light",
+        "innerWidth": 1600,
+        "innerHeight": 1000,
+        "scrollWidth": 1600,
+        "scrollHeight": 2628,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1536,
+        "diagramWidth": 1506,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2419,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 498,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 497,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 497,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 474,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 255,
+            "spaceAboveNodesPx": 213,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 140,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 83,
+            "spaceAboveNodesPx": 50,
+            "spaceBelowNodesPx": 6
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "theme": "light",
+        "innerWidth": 1920,
+        "innerHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 3142,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1856,
+        "diagramWidth": 1826,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2933,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 604,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 603,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 603,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 575,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 309,
+            "spaceAboveNodesPx": 258,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 169,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 101,
+            "spaceAboveNodesPx": 61,
+            "spaceBelowNodesPx": 7
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "theme": "light",
+        "innerWidth": 2048,
+        "innerHeight": 1320,
+        "scrollWidth": 2048,
+        "scrollHeight": 3190,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1920,
+        "diagramWidth": 1845,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 68,
+          "diagramChromePx": 94,
+          "svgPx": 2964,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 611,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 609,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 609,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 581,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 312,
+            "spaceAboveNodesPx": 261,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 171,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 102,
+            "spaceAboveNodesPx": 62,
+            "spaceBelowNodesPx": 8
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 44,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      }
+    ]
+  },
+  "viewerChrome": {
+    "status": "pass",
+    "viewports": [
+      {
+        "width": 1440,
+        "height": 900,
+        "theme": "light",
+        "innerWidth": 1440,
+        "innerHeight": 900,
+        "scrollWidth": 1440,
+        "scrollHeight": 2305,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1376,
+        "diagramWidth": 1346,
+        "pageComposition": {
+          "bodyPaddingPx": 12,
+          "headerPx": 52,
+          "diagramChromePx": 78,
+          "svgPx": 2162,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 445,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 444,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 444,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 239,
+            "spaceAboveNodesPx": 201,
+            "spaceBelowNodesPx": 4
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 423,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 228,
+            "spaceAboveNodesPx": 190,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 125,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 74,
+            "spaceAboveNodesPx": 45,
+            "spaceBelowNodesPx": 5
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1600,
+        "height": 1000,
+        "theme": "light",
+        "innerWidth": 1600,
+        "innerHeight": 1000,
+        "scrollWidth": 1600,
+        "scrollHeight": 2628,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1536,
+        "diagramWidth": 1506,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2419,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 498,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 497,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 497,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 267,
+            "spaceAboveNodesPx": 225,
+            "spaceBelowNodesPx": 5
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 474,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 255,
+            "spaceAboveNodesPx": 213,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 140,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 83,
+            "spaceAboveNodesPx": 50,
+            "spaceBelowNodesPx": 6
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 1920,
+        "height": 1080,
+        "theme": "light",
+        "innerWidth": 1920,
+        "innerHeight": 1080,
+        "scrollWidth": 1920,
+        "scrollHeight": 3142,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1856,
+        "diagramWidth": 1826,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 60,
+          "diagramChromePx": 84,
+          "svgPx": 2933,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 604,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 603,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 603,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 324,
+            "spaceAboveNodesPx": 273,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 575,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 309,
+            "spaceAboveNodesPx": 258,
+            "spaceBelowNodesPx": 7
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 169,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 101,
+            "spaceAboveNodesPx": 61,
+            "spaceBelowNodesPx": 7
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 54,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      },
+      {
+        "width": 2048,
+        "height": 1320,
+        "theme": "light",
+        "innerWidth": 2048,
+        "innerHeight": 1320,
+        "scrollWidth": 2048,
+        "scrollHeight": 3190,
+        "overflowX": false,
+        "overflowY": true,
+        "verticalScrollAccepted": true,
+        "overflowDisposition": "readable-vertical-scroll",
+        "readerLayout": "adaptive",
+        "readerOverflow": "authored",
+        "readerFit": "width-first",
+        "ok": true,
+        "readerWidth": 1920,
+        "diagramWidth": 1845,
+        "pageComposition": {
+          "bodyPaddingPx": 64,
+          "headerPx": 68,
+          "diagramChromePx": 94,
+          "svgPx": 2964,
+          "cardsPx": 0,
+          "viewBoxHeight": 1976
+        },
+        "viewBoxWidth": 1230,
+        "workflowLanes": [
+          {
+            "frameId": "lane-4",
+            "heightPx": 611,
+            "nodeCount": 5,
+            "nodeIds": [
+              "runDir",
+              "agentsDir",
+              "manifest",
+              "ledger",
+              "reports"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-0",
+            "heightPx": 609,
+            "nodeCount": 4,
+            "nodeIds": [
+              "surface",
+              "flags",
+              "final",
+              "readCmd"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-3",
+            "heightPx": 609,
+            "nodeCount": 3,
+            "nodeIds": [
+              "emit",
+              "dispatch",
+              "settle"
+            ],
+            "nodeSpanPx": 327,
+            "spaceAboveNodesPx": 276,
+            "spaceBelowNodesPx": 6
+          },
+          {
+            "frameId": "lane-2",
+            "heightPx": 581,
+            "nodeCount": 5,
+            "nodeIds": [
+              "refused",
+              "gate",
+              "confirm",
+              "dry",
+              "abandoned"
+            ],
+            "nodeSpanPx": 312,
+            "spaceAboveNodesPx": 261,
+            "spaceBelowNodesPx": 8
+          },
+          {
+            "frameId": "lane-1",
+            "heightPx": 171,
+            "nodeCount": 4,
+            "nodeIds": [
+              "allowlist",
+              "pipeline",
+              "synth",
+              "specialists"
+            ],
+            "nodeSpanPx": 102,
+            "spaceAboveNodesPx": 62,
+            "spaceBelowNodesPx": 8
+          }
+        ],
+        "minimumProjectedNodeTextPx": 8,
+        "minimumProjectedNonEdgeTextPx": 8,
+        "minimumProjectedEdgeTextPx": 8,
+        "minimumProjectedNodeText": "/role-fleet · tool",
+        "minimumProjectedNodeTextDetail": "context",
+        "minimumProjectedNodeTextOwner": {
+          "kind": "node",
+          "id": "surface"
+        },
+        "minimumRequiredNodeTextPx": 6,
+        "readabilityOk": true,
+        "hasLegend": true,
+        "hasNavigationDock": true,
+        "legendDockIntersectionArea": 0,
+        "dockStageIntersectionArea": 0,
+        "dockStageGap": 10,
+        "requiredDockStageGap": 10,
+        "viewerChromeStageOk": true,
+        "viewerChromeReserve": 44,
+        "viewerChromeActive": true,
+        "viewerChromeOk": true,
+        "resolvedTheme": "light"
+      }
+    ]
+  },
+  "captures": {
+    "status": "not-requested",
+    "screenshots": [],
+    "contactSheet": null
+  },
+  "sidecars": {
+    "receipt": "omp-role-fleet.browser-check.json",
+    "files": []
+  }
+}
