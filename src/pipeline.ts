@@ -11,12 +11,21 @@ import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { GateVerdict, Fleet, RolePlan, RoleSpec } from "./core.ts";
-import { planWaves } from "./core.ts";
-import { mergeProposals, synthesizePlan } from "./synthesize.ts";
+import { isCouncilMember, planWaves, VOCAB } from "./core.ts";
+import { mergeProposals, isDegenerateCast, synthesizePlan } from "./synthesize.ts";
 import { proposeSpecialists, shouldPropose, type RoleProposer } from "./generate.ts";
 import { gatePlan } from "./gate.ts";
+import { baseModel } from "./model-observed.ts";
 import { filterToSeats } from "./confirm.ts";
-import { dispatchGroups, emitAgents, pruneRunDirs, type DispatchGroup, type EmittedAgent } from "./agents.ts";
+import {
+  dispatchGroups,
+  emitAgents,
+  pruneRunDirs,
+  runIdAt,
+  writeRunManifest,
+  type DispatchGroup,
+  type EmittedAgent,
+} from "./agents.ts";
 
 /** Run directories kept under `<repo>/.role-fleet/`. Enough for a multi-wave
  *  run plus recent history, without letting the tree grow without bound. */
@@ -104,6 +113,8 @@ export interface RunOptions {
   consul?: string;
   /** Scout + review seats only; suppresses the code cast and the proposal tier. */
   reviewOnly?: boolean;
+  /** Write seats to fan the implementation out across (`implementer-1` …). */
+  slices?: number;
   /** Cheap model call for the dynamic tier; injected, absent = static only. */
   propose?: RoleProposer;
   /**
@@ -113,12 +124,22 @@ export interface RunOptions {
    * pinned selector.
    */
   resolveModel?: (spec: string) => string | undefined;
+  /** Plugin version recorded in the run manifest, when the surface knows it. */
+  pluginVersion?: string;
   /**
    * Ask before anything is written or dispatched. Receives the approved plan
    * and returns the seat ids to keep, or `null` to abandon the run. Absent — or
    * a host with no interactive UI — dispatches without asking.
    */
   confirm?: (plan: RolePlan) => Promise<ReadonlySet<string> | null>;
+  /**
+   * Hand the approved plan to the surface that dispatches it (the command sends
+   * it to the main model; the tool has no dispatch step). Absent = emit only.
+   * Called after the manifest is written, so a failure here leaves a complete
+   * on-disk record and an explicit `dispatchError` rather than pretending the
+   * run succeeded.
+   */
+  onDispatch?: (result: RunResult) => Promise<void> | void;
 }
 
 export interface RunResult {
@@ -137,6 +158,12 @@ export interface RunResult {
    * the surface asks for an info-level notice instead.
    */
   abandoned?: boolean;
+  /** Agent files were written. False for a dry run and for a rejected plan. */
+  emitted?: boolean;
+  /** The dispatch callback ran and returned without throwing. */
+  dispatched?: boolean;
+  /** Why the dispatch callback failed, when it did. */
+  dispatchError?: string;
 }
 
 /**
@@ -178,7 +205,23 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // place both surfaces pass through, so the value rules live here.
   const seatNotes: string[] = [];
   const named = opts.models?.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim()) ?? [];
-  const models = [...new Set(named)];
+  // Exact duplicates collapse first, then thinking-level variants of one model
+  // (`provider/id` vs `provider/id:high`) collapse onto the first spelling. Two
+  // council members on one model is the double-priced single review this list
+  // exists to avoid, and the host resolves the suffix to the same model.
+  const exact = [...new Set(named)];
+  const seenBase: Record<string, string> = {};
+  const models: string[] = [];
+  for (const model of exact) {
+    const key = baseModel(model);
+    const prior = Object.hasOwn(seenBase, key) ? seenBase[key] : undefined;
+    if (prior !== undefined) {
+      seatNotes.push(`review models: ${model} is ${prior} with a thinking-level suffix — dropped`);
+      continue;
+    }
+    seenBase[key] = model;
+    models.push(model);
+  }
   const dropped = (opts.models?.length ?? 0) - models.length;
   if (dropped > 0) {
     seatNotes.push(
@@ -196,14 +239,13 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   }
 
   const runId = nextRunId();
-  // A council is worth its cost when the user asks for it or the task says
-  // "council"/"different providers" explicitly; otherwise one reviewer stands.
-  const councilWords = /\b(council|different (models|providers)|multi-model|cross-model)\b/i;
   // A named list is itself the ask for several eyes: `--models a,b` with no
   // `--council` runs exactly two reviewers, because one reviewer per named model
   // is what the list means — padding it to the default three would spend runs
-  // the user never asked for on models they did not name.
-  const council = opts.council ?? (models.length ? models.length : councilWords.test(opts.task) ? 3 : 0);
+  // the user never asked for on models they did not name. The wording, when
+  // there is no list, comes from the shared table like every other reading of
+  // the task text.
+  const council = opts.council ?? (models.length ? models.length : VOCAB.council.test(opts.task) ? 3 : 0);
   const councilSize = Math.max(council, models.length);
 
   let plan = synthesizePlan({
@@ -215,6 +257,7 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
     ...(models.length ? { models } : {}),
     ...(consul ? { consul } : {}),
     ...(opts.reviewOnly ? { reviewOnly: true } : {}),
+    ...(opts.slices && opts.slices > 1 ? { slices: opts.slices } : {}),
   });
   plan.notes.push(...seatNotes);
   // The run id travels with the plan: the agent files carry it, so a later run
@@ -240,8 +283,28 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   // merge below can strip roles, so recomputing it further down would answer a
   // different question than the one the merge was asked.
   const analysisOnly = plan.analysisOnly ?? false;
-  if (opts.propose && !opts.reviewOnly) {
-    if (shouldPropose(opts.task, analysisOnly)) {
+  // Keyed on the cast as well as the flag: a degenerate cast carries
+  // `analysisOnly: false`, so the flag alone could never catch the plans that
+  // need the tier most. See `shouldPropose`.
+  const proposalScope = { degenerate: isDegenerateCast(plan.roles), analysisOnly };
+  if (!opts.reviewOnly && shouldPropose(opts.task, proposalScope)) {
+    if (!opts.propose) {
+      // The task asks for specialists and this host has no side turns, so the
+      // tier cannot run — and this fact is checked *before* the dry-run one,
+      // because it is the fact the user cannot discover any other way: a dry run
+      // that reported "skipped, it is a paid model call" on a host that could
+      // never have made that call would claim a saving that was never on offer.
+      //
+      // `--review-only` is excluded because this is a statement about the *host*.
+      // A run that suppressed the tier by flag has a host that could run it, and
+      // reporting a missing capability there describes the machine incorrectly.
+      plan.notes.push("specialist tier unavailable on this host — static cast kept");
+    } else if (opts.dryRun) {
+      // `--dry-run` means the cast without spending anything, and the tier is a
+      // real model call. Skipping it is the difference between that promise and
+      // a paid run nobody asked for.
+      plan.notes.push("dry run: specialist tier skipped — it is a paid model call");
+    } else {
       const proposed = await proposeSpecialists(opts.task, opts.propose);
       if (!proposed?.length) {
         plan.notes.push("specialist proposal rejected — static cast kept");
@@ -253,15 +316,6 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
         });
       }
     }
-  } else if (!opts.reviewOnly && shouldPropose(opts.task, analysisOnly)) {
-    // The task asks for specialists and this host has no side turns, so the tier
-    // cannot run. Saying so beats a silent skip: the user asked for something the
-    // plan is quietly not going to do.
-    //
-    // `--review-only` is excluded because this is a statement about the *host*.
-    // A run that suppressed the tier by flag has a host that could run it, and
-    // reporting a missing capability there describes the machine incorrectly.
-    plan.notes.push("specialist tier unavailable on this host — static cast kept");
   }
 
   const gate = gatePlan(plan, fleet);
@@ -308,6 +362,29 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
       }
     : approved;
   approved = resolved;
+
+  // A council is only a council when its members answer on different models.
+  // Distinct aliases are the request, not the guarantee: a `modelRoles` setup
+  // may point `@slow`, `@task` and `@plan` at one model, and the run would pay
+  // three times for one blind spot while the cast still reads as independent.
+  // Resolution is the first point where this is knowable; the note is the last
+  // one before the spend.
+  const councilMembers = approved.roles.filter((r) => isCouncilMember(r.id));
+  if (councilMembers.length > 1) {
+    const byModel: Record<string, string[]> = {};
+    for (const member of councilMembers) {
+      const concrete = member.modelResolved ?? (member.model.startsWith("@") ? undefined : member.model);
+      if (!concrete) continue;
+      const key = baseModel(concrete);
+      (byModel[key] ??= []).push(member.id);
+    }
+    for (const [model, ids] of Object.entries(byModel)) {
+      if (ids.length < 2) continue;
+      approved.notes.push(
+        `council independence: ${ids.join(", ")} all resolve to ${model} — ${ids.length} paid reviews share one model`,
+      );
+    }
+  }
 
   // Confirmation happens here: after the gate has approved the shape and the
   // models are known, before any file is written and before the main model is
@@ -373,9 +450,21 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
   const agentDir = join(opts.cwd, ".omp", "agents");
   const agents = await emitAgents(approved, agentDir);
   // Every run creates a directory under `.role-fleet/`, so the tree is bounded
-  // here rather than left to grow one directory per run forever.
+  // here rather than left to grow one directory per run forever. The manifest is
+  // written after it: prune spares the current run by construction, and writing
+  // the record into a directory that is about to be kept is one less ordering
+  // question than writing it first.
   await pruneRunDirs(join(opts.cwd, ".role-fleet"), runId, RUN_DIR_RETENTION);
-  return {
+  await writeRunManifest(join(opts.cwd, ".role-fleet", runId), {
+    runId,
+    task: opts.task,
+    startedAt: runIdAt(runId),
+    notes: approved.notes,
+    agents,
+    outcomes: [],
+    ...(opts.pluginVersion ? { pluginVersion: opts.pluginVersion } : {}),
+  });
+  const result: RunResult = {
     plan: approved,
     verdict,
     waves,
@@ -383,5 +472,20 @@ export async function runRoleFleet(opts: RunOptions): Promise<RunResult> {
     groups: dispatchGroups(agents),
     agentDir,
     ok: true,
+    emitted: true,
   };
+  if (opts.onDispatch) {
+    try {
+      await opts.onDispatch(result);
+      return { ...result, dispatched: true };
+    } catch (err) {
+      return {
+        ...result,
+        ok: false,
+        dispatched: false,
+        dispatchError: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  return result;
 }

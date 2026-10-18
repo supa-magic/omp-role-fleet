@@ -21,7 +21,7 @@
  * single label (`"ReviewerC1"`). The checked set lives inside the picker and
  * never reaches the extension, so it cannot confirm a cast.
  */
-import { isCouncilMember, SEAT_PURPOSE, type RolePlan, type RoleSpec } from "./core.ts";
+import { grantsWrite, isCouncilMember, SEAT_PURPOSE, type RolePlan, type RoleSpec } from "./core.ts";
 
 /** A choice on the preset screen. */
 export type PresetId = "as-planned" | "analysis-only" | "single-reviewer" | "pick-seats";
@@ -54,27 +54,14 @@ export interface SeatRow {
 }
 
 /**
- * A seat that can change *the code under review* through `edit`.
+ * A seat that can change the code — the one question this screen answers.
  *
- * `write` alone does not count here: a council member gains it when a consul is
- * appointed, purely so its report reaches the filesystem to be read. Treating
- * that as "writes" made the review-only preset drop every reviewer and the consul
- * with them — which would leave an investigator looking at a tree nobody checked.
- *
- * It is NOT a claim that a `write` holder is harmless, and the labels below say
- * so explicitly: `write` is repo-wide and path-unrestricted, so a council member
- * in a consul run can create or overwrite any file. The grant is honest about its
- * purpose and dishonest about its reach; this screen names the reach instead of
- * repeating the purpose.
+ * The rule lives in `core.grantsWrite` rather than here, because the answer is
+ * `edit`, `write` *or* a shell, and a shell is the wider of the three: it can
+ * write any path it can name. A screen that read `edit` alone would print
+ * "read-only" for the tester and the implementer while both hold a shell, which
+ * is precisely the understated consent this screen exists to prevent.
  */
-const modifiesSource = (r: RoleSpec): boolean => r.tools.includes("edit");
-/**
- * A seat holding `write` without `edit`: it cannot edit an existing file, but it
- * can create or overwrite any path in the repo — its own report is a convention,
- * not a sandbox. Reported on its own line, because the difference between "writes
- * its report" and "can write anywhere" is exactly what the reader is consenting to.
- */
-const writesRepoWide = (r: RoleSpec): boolean => r.tools.includes("write") && !r.tools.includes("edit");
 const councilMembers = (plan: RolePlan): RoleSpec[] => plan.roles.filter((r) => isCouncilMember(r.id));
 /**
  * Council size → the word the preset's copy uses.
@@ -133,20 +120,26 @@ function seatModel(role: RoleSpec): string {
 }
 
 /**
- * The authority a seat actually holds, in the words the screen shows.
+ * The authority a seat holds, in the words the screen shows.
  *
- * Three tiers, because there are three real ones. `edit` changes code. `write`
- * without `edit` is the consul case: it cannot modify an existing file but it
- * can create or overwrite any path, which is a strictly larger grant than
- * "writes its own report" claims. Anything else cannot write at all. Rendering
- * the second tier as the first would repeat the seat brief's convention as if it
- * were an enforced boundary, and this is the one screen whose whole job is to
- * say who can write before anything is spent.
+ * Three phrases, and one home for them: the roster line and the picker row both
+ * print this, so the wording cannot drift between the two screens that are
+ * asking the user the same question.
+ *
+ * A shell gets its own phrase because it is not an editor's grant — it can run
+ * anything, delete anything it can reach and write any path it can name, where
+ * `edit` changes files and `write` cannot edit one at all. Calling it "can change
+ * the code" would understate the one thing a reader is consenting to.
  */
+const AUTHORITY = {
+  shell: "can change the code and run commands",
+  code: "can change the code",
+  read: "read-only",
+} as const;
+
 function authority(role: RoleSpec): string {
-  if (modifiesSource(role)) return "can change the code";
-  if (writesRepoWide(role)) return "holds repo-wide write — can create or overwrite any path";
-  return "read-only";
+  if (role.tools.includes("bash")) return AUTHORITY.shell;
+  return grantsWrite(role.tools) ? AUTHORITY.code : AUTHORITY.read;
 }
 
 /**
@@ -228,26 +221,17 @@ export function castPresets(plan: RolePlan): Preset[] {
     preset("as-planned", "Run all of them", seatIds(plan.roles), (_kept, lost) => `All seats, exactly as planned.${lostClause(lost)}`),
   ];
 
-  const codeWriters = plan.roles.filter(modifiesSource);
+  const codeWriters = plan.roles.filter((r) => grantsWrite(r.tools));
   if (codeWriters.length && codeWriters.length < plan.roles.length) {
-    const readers = plan.roles.filter((r) => !modifiesSource(r));
+    const readers = plan.roles.filter((r) => !grantsWrite(r.tools));
     presets.push(
       preset(
         "analysis-only",
         "Look, don't touch",
         seatIds(readers),
-        (kept, lost) => {
-          // Counted after filtering: a seat that is gone cannot write anything,
-          // and claiming it still holds repo-wide write would overstate the risk.
-          const repoWriters = kept.filter(writesRepoWide);
-          return (
-            `Drops ${codeWriters.map(seatLabel).join(", ")} — no seat can edit code` +
-            (repoWriters.length
-              ? `. ${repoWriters.length} seat(s) still hold repo-wide write (${repoWriters.map(seatLabel).join(", ")}) and could write any path.`
-              : ", and nothing here can write at all.") +
-            lostClause(lost)
-          );
-        },
+        // Nothing left in this cast can write: `grantsWrite` is the rule — `edit`,
+        // `write` or a shell — and this choice drops every seat holding one.
+        (_kept, lost) => `Drops ${codeWriters.map(seatLabel).join(", ")} — no seat can change the code.${lostClause(lost)}`,
       ),
     );
   }
@@ -304,13 +288,7 @@ export function seatRows(plan: RolePlan, waves: RoleSpec[][]): SeatRow[] {
     return {
       id: r.id,
       label: count > 1 ? `${title} ${count}` : title,
-      description: `${seatPurpose(r)}. ${
-        modifiesSource(r)
-          ? "Can change the code."
-          : writesRepoWide(r)
-            ? "Holds repo-wide write: cannot edit an existing file, but can create or overwrite any path in the repo."
-            : "Read-only."
-      }`,
+      description: `${seatPurpose(r)}: ${authority(r)}.`,
       preview: `${seatModel(r)} · wave ${waveOf.get(r.id) ?? "?"}`,
     };
   });

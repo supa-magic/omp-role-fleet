@@ -10,7 +10,7 @@
  * count past the cap.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-import { CAPABILITY_ID, WRITE_TOOLS } from "./core.ts";
+import { BUILD_TOOLS, CAPABILITY_ID, grantsWrite, VOCAB } from "./core.ts";
 import { SPECIALISTS } from "./library.ts";
 
 /** One cheap model call; injected so tests run without a provider. */
@@ -18,8 +18,10 @@ export type RoleProposer = (task: string) => Promise<string>;
 
 const PROPOSED_ALIAS = ["@smol", "@task", "@slow", "@plan", "@designer", "@vision"];
 // Derived, not a third copy: the sandbox may grant a proposed role exactly the
-// tools a hand-written writer seat gets, so the two can never drift apart.
-const ALLOWED_TOOLS: readonly string[] = WRITE_TOOLS;
+// tools a hand-written builder seat gets — a shell included, since a proposed
+// implementer that cannot run a check is a builder that cannot report one — so
+// the two can never drift apart.
+const ALLOWED_TOOLS: readonly string[] = BUILD_TOOLS;
 const ALLOWED_EFFORT = new Set<Effort>(["minimal", "low", "medium", "high", "xhigh"]);
 
 const PROMPT = [
@@ -99,7 +101,9 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
     needsVision: model === "@vision",
     // A real seat, not a literal "task": allowlist mode routes by seat, so a
     // seat no file can name means the role keeps its alias even in a pinned run.
-    core: tools.some((t) => t === "edit" || t === "write") ? "implementer" : "reviewer",
+    // A shell counts as a writer: it is a grant that can change the tree, so a
+    // proposal holding one must be refused on a plan that promised it would not.
+    core: grantsWrite(tools) ? "implementer" : "reviewer",
     model,
     artifact: "", // the caller assigns the run directory
   };
@@ -161,12 +165,33 @@ export function parseProposal(reply: string): RoleSpec[] | null {
   return roles;
 }
 
-/** Decide whether the static plan is weak enough to justify a model call. */
-export function shouldPropose(task: string, planIsAnalysisOnly: boolean): boolean {
-  if (/\b(specialist|expert|consultant)\b/i.test(task)) return true;
-  // Thin analysis plans earn a proposal once there is enough task text for a
-  // specialist to be distinguishable from the generic scout.
-  return planIsAnalysisOnly && task.split(/\s+/).length >= 5;
+/** What the static cast looks like to the tier that may have to cover for it. */
+export interface ProposalScope {
+  /**
+   * Nothing but an investigator: the task matched no shape the static
+   * heuristics know — an unknown verb, or another language.
+   */
+  degenerate: boolean;
+  /** The task asks to look, not to change (the static tier's own verdict). */
+  analysisOnly: boolean;
+}
+
+/**
+ * Whether the static cast is weak enough to justify a model call.
+ *
+ * The tier exists to cover what the heuristics cannot see, so the trigger is
+ * "the cast cannot serve this task" — keyed on the *cast*, not on the analysis
+ * flag alone. That inversion is the whole point: a degenerate cast carries
+ * `analysisOnly: false` (nothing matched a look-verb either), so the tier could
+ * never fire on it, and `add a dark mode toggle`, `build a settings page` and
+ * every task phrased in another language shipped one investigator with no
+ * second chance. A thin *analysis* cast keeps the old path: enough task text
+ * for a specialist to be distinguishable from the generic scout.
+ */
+export function shouldPropose(task: string, scope: ProposalScope): boolean {
+  if (VOCAB.specialistAsk.test(task)) return true;
+  if (scope.degenerate) return true;
+  return scope.analysisOnly && task.split(/\s+/).length >= 5;
 }
 
 /**

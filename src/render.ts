@@ -1,7 +1,7 @@
 /** Compact rendering of a plan, a verdict, and the dispatch groups. */
-import { isCouncilMember } from "./core.ts";
+import { isCouncilMember, isSliceSeat } from "./core.ts";
 import type { GateVerdict, RolePlan, RoleSpec } from "./core.ts";
-import type { DispatchGroup, EmittedAgent } from "./agents.ts";
+import type { DispatchGroup } from "./agents.ts";
 
 /**
  * Model label for a role: the concrete `provider/id` when the host resolved
@@ -113,6 +113,52 @@ function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string
   });
 }
 
+/** One dispatchable seat, with the run-level roster name the main model uses. */
+export interface DispatchItem {
+  name: string;
+  agent: string;
+  role: string;
+  model: string;
+  modelResolved?: string;
+  artifact: string;
+  dependsOn: string[];
+  writesOwnReport: boolean;
+}
+
+export interface DispatchPlanGroup {
+  wave: number;
+  parallel: boolean;
+  conflicted: boolean;
+  agents: DispatchItem[];
+}
+
+/**
+ * The machine-readable dispatch plan: the same batches the markdown renders,
+ * with the roster names allocated once across the run. Tool callers get this in
+ * `details` so they do not have to parse prose to find wave boundaries, renames
+ * or artifact paths.
+ */
+export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
+  const everyAgent = groups.flatMap((g) => g.agents);
+  const names = allocateRosterNames(everyAgent);
+  let next = 0;
+  return groups.map((g) => ({
+    wave: g.wave,
+    parallel: g.parallel,
+    conflicted: g.conflicted === true,
+    agents: g.agents.map((a) => ({
+      name: names[next++]!,
+      agent: a.agent,
+      role: a.role,
+      model: a.model,
+      ...(a.modelResolved ? { modelResolved: a.modelResolved } : {}),
+      artifact: a.artifact,
+      dependsOn: [...a.dependsOn],
+      writesOwnReport: a.writesOwnReport,
+    })),
+  }));
+}
+
 /**
  * One line per agent: roster id, role, and the model that runs it.
  *
@@ -120,7 +166,10 @@ function allocateRosterNames(agents: ReadonlyArray<{ role: string; model: string
  * has no model field), so without this table the concrete model exists in the
  * run and nowhere in the output the user reads.
  */
-function renderModelTable(agents: ReadonlyArray<EmittedAgent>, nameOf: Map<string, string>): string[] {
+function renderModelTable(
+  agents: ReadonlyArray<{ agent: string; role: string; model: string; modelResolved?: string }>,
+  nameOf: Map<string, string>,
+): string[] {
   return [
     "Models in this run (roster id → role → model):",
     "",
@@ -142,10 +191,10 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
   // Allocated across every wave, not per wave: the roster id is how the main
   // model refers to an agent for the whole run, so uniqueness is a run-level
   // property even though each wave is its own dispatch batch.
-  const everyAgent = groups.flatMap((g) => g.agents);
-  const names = allocateRosterNames(everyAgent);
-  const nameOf = new Map(everyAgent.map((a, i) => [a.agent, names[i]!]));
-  groups.forEach((g, i) => {
+  const planned = dispatchPlan(groups);
+  const everyAgent = planned.flatMap((g) => g.agents);
+  const nameOf = new Map(everyAgent.map((a) => [a.agent, a.name]));
+  planned.forEach((g, i) => {
     const label = g.conflicted
       ? " — dependency conflict: dispatch sequentially and reconcile"
       : g.parallel
@@ -159,7 +208,7 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
     lines.push(
       "```json",
       JSON.stringify(
-        g.agents.map((a) => ({ name: nameOf.get(a.agent), agent: a.agent })),
+        g.agents.map((a) => ({ name: a.name, agent: a.agent })),
         null,
         2,
       ),
@@ -167,7 +216,7 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
       "",
     );
     lines.push(`Agent definitions: \`${agentDir}\`.`);
-    if (i < groups.length - 1) {
+    if (i < planned.length - 1) {
       lines.push(`Wait for wave ${g.wave} to settle before starting wave ${g.wave + 1}.`, "");
     }
   });
@@ -187,6 +236,23 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
       "starting the next wave — a downstream seat is told to read that file:",
       "",
       ...readOnly.map((a) => `- \`${nameOf.get(a.agent)}\` → ${a.artifact}`),
+      "",
+    );
+  }
+  // A fanned-out implementation needs the partition named item by item, and only
+  // the orchestrator can name it: the file map arrives with the scout's report,
+  // which is read before the wave is dispatched. Two writer seats on one file is
+  // the defect the cast is arranged to avoid, so the assignment is stated rather
+  // than left to the seats to negotiate.
+  const sliceSeats = everyAgent.filter((a) => isSliceSeat(a.role));
+  if (sliceSeats.length > 1) {
+    lines.push(
+      `This run fans the implementation out across ${sliceSeats.length} writer seats:`,
+      ...sliceSeats.map((a) => `- \`${nameOf.get(a.agent)}\``),
+      "",
+      "Give each one the exact files it owns — from the scout's map — and tell it to touch",
+      "no path outside that set. They are one parallel wave: two seats that were not told",
+      "apart will edit the same files.",
       "",
     );
   }

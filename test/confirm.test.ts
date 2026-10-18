@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { castPresets, filterToSeats, seatRows } from "../src/confirm.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
-import { isCouncilMember, planWaves } from "../src/core.ts";
+import { grantsWrite, isCouncilMember, planWaves } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 
 function planFor(task: string, extra: Record<string, unknown> = {}) {
@@ -104,14 +104,17 @@ test("every seat row names its model and whether it writes", () => {
   // be mistaken for something they are choosing.
   const implementer = rows.find((r) => r.id === "implementer")!;
   assert.equal(implementer.label, "Implementer");
-  assert.match(implementer.description, /Can change the code/);
+  // The row ends in the same authority phrase the roster line prints, and the
+  // implementer's grant is the shell one now: a reader has to be able to see
+  // that this seat can run commands, not only that it can edit.
+  assert.match(implementer.description, /can change the code and run commands/);
   assert.match(implementer.preview, /wave \d/);
   assert.match(implementer.preview, /@task/, implementer.preview);
   assert.ok(implementer.description.length > 0, "a row must say what the seat does");
 
   const reviewer = rows.find((r) => r.id === "reviewer")!;
   assert.equal(reviewer.label, "Reviewer");
-  assert.match(reviewer.description, /Read-only/);
+  assert.match(reviewer.description, /read-only/);
   assert.match(reviewer.preview, /@slow/);
 });
 
@@ -213,17 +216,21 @@ test("the confirmation screen sees resolved models, not bare aliases", async () 
 });
 
 test("the review-only preset keeps only seats that can still run", async () => {
-  // A council member gains `write` when a consul is appointed, so its report
-  // reaches the filesystem. Counting that as "writes" made this preset drop every
-  // reviewer and the consul for the wrong reason.
+  // Authority is three tiers, and this preset has to reason about all of them. A
+  // council member used to gain `write` when a
+  // consul was appointed, so its report could reach the filesystem; that grant is
+  // gone, because the orchestrator places every read-only seat's report at its
+  // artifact path before the next wave. So there is nothing about a council
+  // member this preset has to drop — it is read-only like the scout — and the
+  // copies below have to say so rather than describing a tier no seat holds.
   //
   // The other half is the dependency rule, and it cuts deeper than it looks: on a
   // *build* plan the reviewer waits on the implementer, so dropping the
   // implementer takes the reviewer with it — and the preset must say so instead
   // of promising a review nobody performs.
   //
-  // Through the pipeline: a named model list becomes a council there, and that
-  // is where the write grant appears.
+  // Through the pipeline: a named model list becomes a council there, which is
+  // how a run gets council members to read a roster line for.
   const buildPlan = (
     await runRoleFleet({
       task: "refactor the auth module",
@@ -252,7 +259,7 @@ test("the review-only preset keeps only seats that can still run", async () => {
     kept.every((r) => (r.dependsOn ?? []).every((d) => build!.seats.includes(d))),
     "a promised seat is waiting on one the choice removed",
   );
-  assert.ok(kept.every((r) => !r.tools.includes("edit")), "a kept seat can still edit the code");
+  assert.ok(kept.every((r) => !grantsWrite(r.tools)), "a kept seat can still change the code");
 
   // On a plan that writes nothing there is no "look, don't touch" choice to
   // offer: every seat already qualifies, and a preset that changes nothing is
@@ -275,21 +282,55 @@ test("the review-only preset keeps only seats that can still run", async () => {
   assert.ok(asPlanned.seats.includes("reviewer-c1"), `reviewers missing: ${asPlanned.seats.join(",")}`);
   assert.ok(asPlanned.seats.includes("consul"), `consul missing: ${asPlanned.seats.join(",")}`);
 
-  // The grant is repo-wide, and every surface that describes it says so. The old
-  // label — "Writes only its own report." — repeated the seat brief's convention
-  // as if the tool were scoped to the artifact, which it is not: `write` can
-  // create or overwrite any path in the repo. The roster preview is the first
-  // thing the user reads; the picker row is the last.
+  // Authority is three tiers, and every surface that describes it says so. The
+  // council's repo-wide grant is gone — the orchestrator places its report at
+  // `review-cN.md` / `consul.md` itself — so a council member is read-only like
+  // the scout. The roster preview is the first thing the user reads; the picker
+  // row is the last. Both assertions are anchored at the end of the string: a row
+  // that grew a third tier, or fell back to the seat brief's convention ("Writes
+  // only its own report."), fails here rather than shipping.
   const rows = seatRows(reviewPlan, planWaves(reviewPlan.roles));
   const reviewerRow = rows.find((r) => r.id === "reviewer-c1")!;
-  assert.match(reviewerRow.description, /repo-wide write/, reviewerRow.description);
-  assert.ok(!/Writes only its own report/.test(reviewerRow.description), reviewerRow.description);
+  assert.match(reviewerRow.description, /read-only\.$/, reviewerRow.description);
   const scoutRow = rows.find((r) => r.id === "scout")!;
-  assert.match(scoutRow.description, /Read-only\./, scoutRow.description);
-  assert.ok(!/repo-wide write/.test(scoutRow.description), scoutRow.description);
+  assert.match(scoutRow.description, /read-only\.$/, scoutRow.description);
+  // The other tiers on the picker row, from casts that have them: an editor that
+  // cannot run commands, and the shell grant that is wider than either.
+  const implementerRow = seatRows(buildPlan, planWaves(buildPlan.roles)).find((r) => r.id === "implementer")!;
+  assert.match(implementerRow.description, /can change the code and run commands\.$/, implementerRow.description);
+  const editorPlan = planFor("update the readme");
+  const docsRow = seatRows(editorPlan, planWaves(editorPlan.roles)).find((r) => r.id === "docs-updater")!;
+  assert.match(docsRow.description, /can change the code\.$/, docsRow.description);
+
+  // The roster line itself is `<title> — <purpose> (<model>) — <authority>`, and
+  // a council member's line ends in the same tier as everyone else's here. The
+  // writer phrases are collected once, because the roster and the picker are two
+  // surfaces printing one decision.
+  const writerLine = /— can change the code(?: and run commands)?$/;
+  const reviewerLine = asPlanned.preview.split("\n").find((l) => l.startsWith("Reviewer 1"))!;
+  assert.match(reviewerLine, /^Reviewer 1 — .+ \(xai\/grok-4\) — read-only$/, reviewerLine);
   for (const line of asPlanned.preview.split("\n")) {
-    assert.ok(/read-only|can change the code|repo-wide write/.test(line), `no authority on a roster line: ${line}`);
+    assert.match(line, /— (read-only|can change the code|can change the code and run commands)$/, `no authority on a roster line: ${line}`);
   }
+  // A reader counting the writers off this cast gets zero — the review cast has
+  // no seat that can change anything, and the consult question prints that as
+  // `no seat can change the code`, which the preset copy agrees with.
+  assert.equal(
+    asPlanned.preview.split("\n").filter((l) => writerLine.test(l)).length,
+    0,
+    asPlanned.preview,
+  );
+  assert.match(build!.description, /no seat can change the code/, build!.description);
+
+  // A cast that does have such a seat still discloses it, by name, on the roster:
+  // the implementer is the only line that can, so the count a reader gets off the
+  // first screen is one and the screen says which seat it is — shell included,
+  // since that is the wider half of its grant.
+  const buildAsPlanned = castPresets(buildPlan).find((p) => p.id === "as-planned")!;
+  const writers = buildAsPlanned.preview.split("\n").filter((l) => writerLine.test(l));
+  assert.equal(writers.length, 1, buildAsPlanned.preview);
+  assert.match(writers[0]!, /^Implementer — /, writers[0]!);
+  assert.match(writers[0]!, /and run commands$/, writers[0]!);
 });
 
 

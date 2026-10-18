@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { SPECIALISTS, applySpecialists } from "../src/library.ts";
 import { parseProposal, proposeSpecialists, shouldPropose } from "../src/generate.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
-import { isCouncilMember, planWaves } from "../src/core.ts";
+import { isCouncilMember, planWaves, READ_TOOLS } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { renderDispatch } from "../src/render.ts";
 import { dispatchGroups, emitAgents } from "../src/agents.ts";
@@ -25,13 +25,18 @@ function ids(plan: ReturnType<typeof basePlan>): string[] {
 
 // ── library tier ──────────────────────────────────────────────────────────────
 
-test("UI work earns a designer on @designer", () => {
+test("UI work earns a designer on @designer, in the seat a tester would hold", () => {
+  // UI plus a change verb: the interface is part of what ships, so the designer
+  // is the seat a tester would have filled rather than a seat beside it. Adding
+  // both would fan the run out for one artifact; the cast says so out loud.
   const plan = basePlan("build a landing page with a pricing section");
   const designer = plan.roles.find((r) => r.id === "designer");
   assert.ok(designer, `designer missing; cast is ${ids(plan).join(",")}`);
+  assert.deepEqual(ids(plan), ["scout", "implementer", "reviewer", "designer"]);
+  assert.ok(!ids(plan).includes("tester"), "the designer took that seat, it did not join it");
   assert.equal(designer!.model, "@designer");
   assert.ok(designer!.dependsOn.includes("scout"));
-  assert.ok(plan.notes.some((n) => n.includes("designer")));
+  assert.ok(plan.notes.some((n) => n.includes("designer takes the seat a tester would hold")));
 });
 
 test("a review-only ask mints no writer, even when the task names a UI", () => {
@@ -75,19 +80,18 @@ test("an explicit review ask is a signal without any review word", async () => {
   ).plan!;
   assert.ok(!plan.roles.some((r) => r.id === "designer"), `designer joined: ${ids(plan).join(",")}`);
   assert.ok(!plan.roles.some((r) => r.id === "implementer"), "a named council is not an implementation ask");
-  // Nobody can modify source. `write` is held only by the review seats — and
-  // only because a consul was appointed, so their reports reach the filesystem
-  // for it to read (see the council section in the README).
-  assert.deepEqual(
-    plan.roles.filter((r) => r.tools.includes("edit")).map((r) => r.id),
-    [],
-    "no seat may edit source in a review",
-  );
-  assert.deepEqual(
-    plan.roles.filter((r) => r.tools.includes("write")).map((r) => r.id).sort(),
-    ["consul", "reviewer-c1", "reviewer-c2"],
-    "only the review seats and the consul write, and only their own reports",
-  );
+  // The council is the point and it survived the ask: naming two models mints
+  // two members, and the consul joins them.
+  assert.deepEqual(plan.roles.filter((r) => isCouncilMember(r.id)).map((r) => r.id), ["reviewer-c1", "reviewer-c2"]);
+  assert.ok(plan.roles.some((r) => r.id === "consul"), `no consul in ${ids(plan).join(",")}`);
+  // Two tiers only: no seat in this cast holds `edit`, and no seat holds
+  // `write` either. The reports reach the filesystem because the orchestrator
+  // places them at their artifact paths, not because a review seat was handed a
+  // write grant — a grant it could have aimed at a source file instead.
+  for (const role of plan.roles) {
+    assert.ok(!role.tools.includes("edit"), `${role.id} must not hold edit`);
+    assert.ok(!role.tools.includes("write"), `${role.id} must not hold write`);
+  }
 });
 
 test("a build verb alongside a council keeps the implementation seats", () => {
@@ -125,16 +129,19 @@ test("an audit-shaped task with UI wording does not get a writer back", () => {
 });
 
 test("a pure UI task still gets the designer — it is the implementation", () => {
-  // The other side of the rule: a plan with no writer because nobody wrote code
-  // yet is not an analysis plan. Blocking on "does a writer exist" killed this.
-  const plan = synthesizePlan({
-    task: "build a landing page with a pricing section",
-    cwd: "/tmp",
-    workDir: "/tmp/w",
-  });
+  // The other side of the rule: a task that never asked for code is not an
+  // analysis plan, and the designer *is* the implementation there. Blocking on
+  // "does a writer exist" killed this.
+  const plan = synthesizePlan({ task: "design a new onboarding flow", cwd: "/tmp", workDir: "/tmp/w" });
+  assert.deepEqual(ids(plan), ["scout", "designer"]);
   const designer = plan.roles.find((r) => r.id === "designer");
   assert.ok(designer, `designer missing; cast is ${ids(plan).join(",")}`);
-  assert.ok(designer!.tools.includes("write"), "the designer must be able to build the interface");
+  assert.ok(designer!.tools.includes("edit"), "the designer must be able to build the interface");
+
+  // With a change verb the designer takes the seat a tester would have held, so
+  // the cast still holds exactly one implementation seat.
+  const withChange = synthesizePlan({ task: "build a landing page with a pricing section", cwd: "/tmp", workDir: "/tmp/w" });
+  assert.deepEqual(ids(withChange), ["scout", "implementer", "reviewer", "designer"]);
 });
 
 test("security wording earns a read-only security auditor on @slow", () => {
@@ -142,7 +149,9 @@ test("security wording earns a read-only security auditor on @slow", () => {
   const auditor = plan.roles.find((r) => r.id === "security-auditor");
   assert.ok(auditor);
   assert.equal(auditor!.model, "@slow");
-  assert.deepEqual(auditor!.tools, ["read", "grep", "glob"]);
+  // The gate is the grant itself: a seat that can change code is not an auditor.
+  assert.ok(!auditor!.tools.includes("edit") && !auditor!.tools.includes("write"), auditor!.tools.join(","));
+  assert.deepEqual(auditor!.tools, READ_TOOLS);
 });
 
 test("a migration replaces the implementer instead of doubling the writes", () => {
@@ -155,9 +164,13 @@ test("a migration replaces the implementer instead of doubling the writes", () =
 });
 
 test("a migration with no implementer to replace is skipped with a note", () => {
+  // The look verb vetoes `VOCAB.migration`: the task is research, so no change
+  // verb minted the code cast, there is no implementer for the catalog seat to
+  // stand in for, and the cast ships as the analysis ask it is.
   const plan = basePlan("research migration options for the framework upgrade docs");
-  assert.ok(!ids(plan).includes("migration-runner"));
-  assert.ok(plan.notes.some((n) => n.includes("migration-runner")));
+  assert.deepEqual(ids(plan), ["scout", "docs-updater"], `cast is ${ids(plan).join(",")}`);
+  assert.ok(plan.notes.some((n) => n.includes("migration-runner") && n.includes("skipped")));
+  assert.ok(plan.analysisOnly, "the look verb makes this an analysis cast");
 });
 
 test("a migration that names no code vocabulary still gets the runner", () => {
@@ -191,6 +204,9 @@ test("a migration that names no code vocabulary still gets the runner", () => {
     "research migration options for the upgrade path",
     "audit the migration plan before we migrate",
     "compare lodash and ramda before moving the codebase off lodash",
+    // `VOCAB.migration` matches "migrating", the look verb decides the cast:
+    // weighing a migration is not running one.
+    "evaluate migrating off lodash",
   ]) {
     assert.ok(!ids(basePlan(task)).includes("migration-runner"), `${task}: a look minted a writer`);
   }
@@ -297,16 +313,18 @@ test("an invented model, tool, or dependency invalidates the whole proposal", ()
 });
 
 test("a grant that mixes a real tool with a rogue one is refused whole", () => {
-  // Filtering the rogue tool out made `["read","bash"]` a valid read-only role,
-  // so a proposal could request a tool it may not have and still be accepted.
-  // The sandbox refuses the element instead, like a wrong dependency.
+  // Filtering the rogue tool out would make the element a valid role that holds
+  // a tool it may not have, so the sandbox refuses the element instead, like a
+  // wrong dependency. `eval` is the rogue here because a shell is *inside* the
+  // builder grant: the rogue has to be a tool no seat may hold, not merely a
+  // powerful one.
   const mixed = JSON.stringify([
     {
       id: "x-auditor",
       title: "X",
       mission: "Do the thing carefully",
       acceptance: ["a"],
-      tools: ["read", "bash"],
+      tools: ["read", "eval"],
       effort: "low",
       model: "@slow",
       dependsOn: [],
@@ -314,8 +332,9 @@ test("a grant that mixes a real tool with a rogue one is refused whole", () => {
   ]);
   assert.equal(parseProposal(mixed), null, "a mixed valid/rogue grant must be refused");
 
-  // The all-valid grant of the same shape still passes.
-  assert.equal(parseProposal(mixed.replace("bash", "grep"))?.length, 1);
+  // The all-valid grant of the same shape still passes, shell included.
+  assert.equal(parseProposal(mixed.replace("eval", "grep"))?.length, 1);
+  assert.equal(parseProposal(mixed.replace("eval", "bash"))?.length, 1);
 });
 
 test("a dependency that leaves the plan is reported, not dropped in silence", async () => {
@@ -323,10 +342,11 @@ test("a dependency that leaves the plan is reported, not dropped in silence", as
   // The sandbox accepts a dependency on any reserved id, but a role the plan
   // does not contain cannot be waited on. Dropping the edge silently made the
   // proposed role run earlier than the proposal asked for.
+  // Not a dry run: the tier is a paid model call, so `--dry-run` skips it and
+  // the proposal under test would never be merged.
   const result = await runRoleFleet({
     task: "assess the regulatory exposure of our payment data pipeline",
     cwd: dir,
-    dryRun: true,
     maxRoles: 6,
     propose: async () =>
       JSON.stringify([
@@ -348,15 +368,28 @@ test("asking for the specialist tier on a host without side turns says so", asyn
   const dir = await mkdtemp(join(tmpdir(), "rf-noside-"));
   // The tier triggers on the task's own wording now — no flag to remember — so a
   // host that cannot run it has to say so, or the request is silently dropped.
-  const result = await runRoleFleet({ task: "fix the auth bug, bring in a consultant", cwd: dir, dryRun: true });
+  const result = await runRoleFleet({ task: "fix the auth bug, bring in a consultant", cwd: dir });
   assert.equal(result.ok, true);
   assert.ok(
     result.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
     `the skipped tier must be reported: ${result.plan!.notes.join(" | ")}`,
   );
 
-  // Without the flag there is nothing to report — the tier was never asked for.
-  const plain = await runRoleFleet({ task: "fix the auth bug", cwd: dir, dryRun: true });
+  // A dry run on this same host reports the *capability* instead, because that
+  // is the fact the user cannot discover any other way: "skipped, it is a paid
+  // model call" would claim a saving that was never on offer here.
+  const dry = await runRoleFleet({ task: "fix the auth bug, bring in a consultant", cwd: dir, dryRun: true });
+  assert.ok(
+    dry.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `an incapable host must be named even under a dry run: ${dry.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !dry.plan!.notes.some((n) => n.includes("dry run: specialist tier skipped")),
+    `a dry run must not claim a saving this host could not make: ${dry.plan!.notes.join(" | ")}`,
+  );
+
+  // Without the ask there is nothing to report — the tier was never requested.
+  const plain = await runRoleFleet({ task: "fix the auth bug", cwd: dir });
   assert.ok(!plain.plan!.notes.some((n) => n.includes("unavailable")));
 });
 
@@ -374,7 +407,6 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
     const result = await runRoleFleet({
       task: "review with different providers, bring in a consultant",
       cwd: dir,
-      dryRun: true,
       maxRoles: 8,
       propose: await propose(id),
     });
@@ -389,7 +421,6 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
   const merged = await runRoleFleet({
     task: "review with different providers, bring in a consultant",
     cwd: dir,
-    dryRun: true,
     maxRoles: 8,
     propose: await propose("threat-modeler"),
   });
@@ -403,13 +434,23 @@ test("more than three proposed roles is refused outright", () => {
   assert.equal(parseProposal(JSON.stringify([one, { ...one, id: "b-two" }]))?.length, 2);
 });
 
-test("shouldPropose triggers on explicit asks and thin analysis plans", () => {
-  assert.equal(shouldPropose("use a specialist for the migration", false), true);
-  assert.equal(shouldPropose("assess the regulatory exposure of our data pipeline", true), true);
-  assert.equal(shouldPropose("fix the bug", false), false);
+test("shouldPropose triggers on explicit asks, degenerate casts, and thin analysis plans", () => {
+  const build = { degenerate: false, analysisOnly: false };
+  const analysis = { degenerate: false, analysisOnly: true };
+  // The user named a specialist outright: no cast inspection is needed.
+  assert.equal(shouldPropose("use a specialist for the migration", build), true);
+  // Nothing but an investigator — no shape the heuristics know (an unknown
+  // verb, or another language). It carries `analysisOnly: false`, which is
+  // exactly why the analysis flag alone could never catch it.
+  assert.equal(shouldPropose("отрефактори модуль авторизации и проверь его", { degenerate: true, analysisOnly: false }), true);
+  // A thin *analysis* plan keeps the old path: enough task text for a
+  // specialist to be distinguishable from the generic scout.
+  assert.equal(shouldPropose("assess the regulatory exposure of our data pipeline", analysis), true);
+  // A build the static cast already serves pays nothing.
+  assert.equal(shouldPropose("fix the bug", build), false);
   // A short vague task stays static: the model call would cost more than it adds.
-  assert.equal(shouldPropose("help", true), false);
-  assert.equal(shouldPropose("please research this", true), false);
+  assert.equal(shouldPropose("help", analysis), false);
+  assert.equal(shouldPropose("please research this", analysis), false);
 });
 
 test("a throwing proposer degrades to the static cast, not an error", async () => {
@@ -626,10 +667,11 @@ test("a proposed writer cannot enter an analysis-only plan", async () => {
   // no source changes. `applySpecialists` closes this for the static tier; the
   // dynamic tier has to close it for itself.
   const dir = await mkdtemp(join(tmpdir(), "rf-propwriter-"));
+  // Not a dry run: the refusal lives in the merge, and `--dry-run` skips the
+  // merge entirely.
   const result = await runRoleFleet({
     task: "review the payment pipeline for compliance gaps",
     cwd: dir,
-    dryRun: true,
     maxRoles: 8,
     models: ["xai/grok-4", "zai/glm-5"],
     propose: async () =>
@@ -664,7 +706,6 @@ test("a build plan still accepts a proposed writer", async () => {
   const result = await runRoleFleet({
     task: "fix the auth bug and add a regression test, bring in a consultant",
     cwd: dir,
-    dryRun: true,
     maxRoles: 8,
     propose: async () =>
       JSON.stringify([
@@ -694,7 +735,6 @@ test("a writer under a non-implementer id is not mistaken for an analysis-only p
     const result = await runRoleFleet({
       task: `${task} with a specialist expert`,
       cwd: dir,
-      dryRun: true,
       maxRoles: 8,
       propose: async () =>
         JSON.stringify([
@@ -732,7 +772,6 @@ test("the merge re-applies the role cap to what it adds", async () => {
   const result = await runRoleFleet({
     task: "review the auth module for injection risks, consult a specialist expert",
     cwd: dir,
-    dryRun: true,
     maxRoles: 4,
     propose: async () =>
       JSON.stringify([
@@ -759,7 +798,6 @@ test("--review-only on a capable host does not claim the tier is missing", async
   const result = await runRoleFleet({
     task: "review the auth module for security issues and report findings",
     cwd: dir,
-    dryRun: true,
     reviewOnly: true,
     propose: async () => "[]",
   });
@@ -768,15 +806,129 @@ test("--review-only on a capable host does not claim the tier is missing", async
     `a suppressed tier was reported as missing: ${result.plan!.notes.join(" | ")}`,
   );
 
+  // A dry run is suppressed by choice too, and says so with its own note — the
+  // host-capability note stays reserved for a machine that cannot run the tier.
+  const dry = await runRoleFleet({
+    task: "review the auth module for security issues and report findings",
+    cwd: dir,
+    dryRun: true,
+    propose: async () => "[]",
+  });
+  assert.ok(
+    dry.plan!.notes.some((n) => n.includes("dry run: specialist tier skipped")),
+    `a dry run must name the skip: ${dry.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !dry.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `a dry run must not be reported as a missing capability: ${dry.plan!.notes.join(" | ")}`,
+  );
+
   // The same run without a proposer still says it: there the host genuinely
-  // cannot run the tier, which is the only case the note exists for.
+  // cannot run the tier, and that is the fact to report.
   const noHost = await runRoleFleet({
+    task: "review the auth module for security issues and report findings",
+    cwd: dir,
+  });
+  assert.ok(
+    noHost.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `a host without side turns must still be told: ${noHost.plan!.notes.join(" | ")}`,
+  );
+
+  // Both facts can hold at once — a dry run on a host with no side turns — and
+  // there the capability wins: "skipped, it is a paid model call" would claim a
+  // saving that was never on offer, where the missing capability is something
+  // the user cannot discover any other way.
+  const both = await runRoleFleet({
     task: "review the auth module for security issues and report findings",
     cwd: dir,
     dryRun: true,
   });
   assert.ok(
-    noHost.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
-    `a host without side turns must still be told: ${noHost.plan!.notes.join(" | ")}`,
+    both.plan!.notes.some((n) => n.includes("specialist tier unavailable")),
+    `an incapable host must be named even under a dry run: ${both.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !both.plan!.notes.some((n) => n.includes("dry run: specialist tier skipped")),
+    `a dry run must not claim a saving this host could not make: ${both.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a proposed seat holding only a shell is a writer, and refused where nothing may write", async () => {
+  // `bash` is not a read tool: a shell can write any path it can name, so a
+  // proposal that holds one is a writer even without `edit`. Reading the writer
+  // test off `edit`/`write` alone would have merged it into a plan that had just
+  // promised no source changes.
+  const dir = await mkdtemp(join(tmpdir(), "rf-shellwriter-"));
+  const result = await runRoleFleet({
+    task: "audit the payment pipeline for compliance gaps",
+    cwd: dir,
+    maxRoles: 8,
+    propose: async () =>
+      JSON.stringify([
+        { id: "shell-reader", title: "S", mission: "Read with a shell", acceptance: ["a"], tools: ["read", "bash"], effort: "low", model: "@slow", dependsOn: [] },
+        { id: "plain-reader", title: "R", mission: "Read", acceptance: ["a"], tools: ["read"], effort: "low", model: "@task", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    !result.plan!.roles.some((r) => r.id === "shell-reader"),
+    `a shell holder merged into an analysis-only plan: ${result.plan!.roles.map((r) => r.id).join(", ")}`,
+  );
+  assert.ok(result.plan!.roles.some((r) => r.id === "plain-reader"), "the read-only proposal still merges");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("analysis-only plan") && n.includes("shell-reader")),
+    `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a fanned-out plan refuses a proposed writer, and keeps the read-only proposals", async () => {
+  // The fan-out is already every writer the run can keep apart, so a proposed
+  // one would be a second implementation — the same defect as two writers on one
+  // file. The refusal costs one seat, not the tier.
+  const dir = await mkdtemp(join(tmpdir(), "rf-slicewriter-"));
+  const result = await runRoleFleet({
+    // "specialist" is what makes the tier run at all on a build task; the change
+    // verb is what gives the fan-out an implementer to split.
+    task: "fix the login bug with a specialist",
+    cwd: dir,
+    maxRoles: 8,
+    slices: 2,
+    propose: async () =>
+      JSON.stringify([
+        { id: "extra-writer", title: "W", mission: "Write more", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
+        { id: "extra-reader", title: "R", mission: "Read more", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    !result.plan!.roles.some((r) => r.id === "extra-writer"),
+    `a fourth writer merged into a fanned-out plan: ${result.plan!.roles.map((r) => r.id).join(", ")}`,
+  );
+  assert.ok(result.plan!.roles.some((r) => r.id === "extra-reader"), "the read-only proposal still merges");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("fanned-out plan") && n.includes("extra-writer")),
+    `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a council plan still leaves a proposal slot", async () => {
+  // Council members are exempt from the cap as one logical seat. Counting each
+  // of them against `maxRoles` made `slots` zero on exactly the plan that paid
+  // for the proposal tier, so the call succeeded and changed nothing.
+  const dir = await mkdtemp(join(tmpdir(), "rf-councilslot-"));
+  const result = await runRoleFleet({
+    task: "review the auth module with a council of different providers and consult a specialist expert",
+    cwd: dir,
+    council: 3,
+    maxRoles: 4,
+    propose: async () =>
+      JSON.stringify([
+        { id: "threat-modeler", title: "T", mission: "Model threats", acceptance: ["a"], tools: ["read"], effort: "low", model: "@plan", dependsOn: [] },
+      ]),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.plan!.roles.some((r) => r.id === "threat-modeler"),
+    `the council consumed every slot: ${result.plan!.notes.join(" | ")}`,
   );
 });

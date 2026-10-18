@@ -21,6 +21,9 @@ export interface ExpectedModel {
   pinned: string;
   /** Concrete `provider/id` resolved at plan time, when the host could answer. */
   resolved?: string;
+  /** Where this seat's report belongs, and whether the seat can write it. */
+  artifact?: string;
+  writesOwnReport?: boolean;
 }
 
 /** One settled seat whose model differs from what the run expected. */
@@ -77,7 +80,13 @@ function settleKey(agent: string, ran: string): string {
  * baseline rather than not at all.
  */
 export function recordExpectedModels(
-  agents: ReadonlyArray<{ agent: string; model: string; modelResolved?: string }>,
+  agents: ReadonlyArray<{
+    agent: string;
+    model: string;
+    modelResolved?: string;
+    artifact?: string;
+    writesOwnReport?: boolean;
+  }>,
   opts: { subSession?: boolean } = {},
 ): void {
   if (opts.subSession) return;
@@ -87,8 +96,15 @@ export function recordExpectedModels(
     expected.set(a.agent, {
       pinned: a.model,
       ...(a.modelResolved ? { resolved: a.modelResolved } : {}),
+      ...(a.artifact ? { artifact: a.artifact } : {}),
+      ...(a.writesOwnReport !== undefined ? { writesOwnReport: a.writesOwnReport } : {}),
     });
   }
+}
+
+/** The expectation recorded for a generated seat, if this process has one. */
+export function expectedFor(agent: string): ExpectedModel | undefined {
+  return expected.get(agent);
 }
 
 /** A new session must not inherit the previous run's expectations. */
@@ -107,7 +123,7 @@ export function resetExpectedModels(): void {
  * that is not one of the level names is part of the id.
  */
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
-function baseModel(value: string): string {
+export function baseModel(value: string): string {
   const colon = value.lastIndexOf(":");
   if (colon <= 0) return value;
   return THINKING_LEVELS.includes(value.slice(colon + 1)) ? value.slice(0, colon) : value;

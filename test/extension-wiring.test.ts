@@ -9,7 +9,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import roleFleet, { parseFlags } from "../src/index.ts";
+import roleFleet from "../src/index.ts";
+import { parseFlags } from "../src/flags.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { DEFAULT_MAX_ROLES } from "../src/core.ts";
 
@@ -83,7 +84,7 @@ function zodStub(): unknown {
   };
 }
 
-function stubHost(): StubHost {
+function stubHost(opts: { sendMessageThrows?: boolean } = {}): StubHost {
   const commands = new Map<string, Record<string, unknown>>();
   const tools = new Map<string, Record<string, unknown>>();
   const events: string[] = [];
@@ -105,7 +106,10 @@ function stubHost(): StubHost {
       },
       registerCommand: (name, spec) => commands.set(name, spec),
       registerTool: (spec) => tools.set(String(spec.name), spec),
-      sendMessage: (message: string, opts?: unknown) => sent.push({ message, opts }),
+      sendMessage: (message: string, sendOpts?: unknown) => {
+        if (opts.sendMessageThrows) throw new Error("host refused the message");
+        sent.push({ message, opts: sendOpts });
+      },
       logger: { error: (message: string) => errors.push(message) },
     },
   };
@@ -185,15 +189,15 @@ function commandCtx(
 }
 
 /** Invoke the `tool_result` handler the factory registered on the stub host. */
-function hostToolResult(
+async function hostToolResult(
   host: StubHost,
   event: { toolName: string; details: unknown },
   agent: { kind: string } = { kind: "main" },
-): Array<{ text: string; level: string }> {
+): Promise<Array<{ text: string; level: string }>> {
   const entry = host.handlers.get("tool_result");
   assert.ok(entry, "the factory must register a tool_result observer");
   const notices: Array<{ text: string; level: string }> = [];
-  entry(event, { agent, ui: { notify: (text: string, level: string) => notices.push({ text, level }) } });
+  await entry(event, { agent, ui: { notify: (text: string, level: string) => notices.push({ text, level }) } });
   return notices;
 }
 
@@ -228,7 +232,7 @@ test("the tool_result observer turns a settled fallback into a warning", async (
     ],
   };
 
-  const warned = hostToolResult(host, { toolName: "task", details: settled });
+  const warned = await hostToolResult(host, { toolName: "task", details: settled });
   assert.equal(warned.length, 1, `a fallback must notify: ${JSON.stringify(warned)}`);
   assert.equal(warned[0]!.level, "warning", "a fallback is not an info line");
   assert.match(warned[0]!.text, /rf-reviewer-c1/);
@@ -236,13 +240,13 @@ test("the tool_result observer turns a settled fallback into a warning", async (
   assert.match(warned[0]!.text, /FALLBACK/);
 
   // A non-task tool carrying the same payload is not a fleet result.
-  assert.deepEqual(hostToolResult(host, { toolName: "bash", details: settled }), []);
+  assert.deepEqual(await hostToolResult(host, { toolName: "bash", details: settled }), []);
 
   // A subagent session's own task calls are not the parent's fleet.
-  assert.deepEqual(hostToolResult(host, { toolName: "task", details: settled }, { kind: "sub" }), []);
+  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: settled }, { kind: "sub" }), []);
 
   // The same settled seat is not re-notified within one dispatch.
-  assert.deepEqual(hostToolResult(host, { toolName: "task", details: settled }), []);
+  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: settled }), []);
 });
 
 test("the --review-only flag reaches the pipeline, not just the parser", async () => {
@@ -330,11 +334,13 @@ test("the tool surface applies the same review-model rules as the flag path", as
   assert.ok(!/rejected/.test(blank.content[0].text), `a blank entry rejected the run: ${blank.content[0].text}`);
   assert.match(blank.content[0].text, /blank or duplicate/, "the dropped entry must be reported");
 
-  // A blank consul is no consul — and with no consul there is no reason to hand
-  // the council repo-wide write.
+  // A blank consul is no consul. The old guard here asserted the council was not
+  // handed `repo-wide write`; that tier is gone, so the assertion could no longer
+  // fail. What the screen still owes the user is the note, the same way a blank
+  // model entry is reported above.
   const consul = await execute("id", { task: "review the auth fix", council: 3, consul: "  ", dryRun: true }, null, null, at);
   assert.ok(!/\bConsul\b/.test(consul.content[0].text), `a blank consul was seated: ${consul.content[0].text}`);
-  assert.ok(!/repo-wide write/.test(consul.content[0].text), "no consul means no write grant");
+  assert.match(consul.content[0].text, /blank selector was ignored/, "the dropped selector must be reported");
 });
 
 test("the tool's dispatch instructions carry the batch guardrails", async () => {
@@ -357,6 +363,34 @@ test("the tool's dispatch instructions carry the batch guardrails", async () => 
   assert.match(text, /`task` text/);
   assert.match(text, /solutionSpace/);
   assert.match(text, /Do NOT/);
+});
+
+test("the plan tool returns the dispatch batches as data", async () => {
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as (
+    id: string,
+    params: Record<string, unknown>,
+    signal: null,
+    onUpdate: null,
+    ctx: unknown,
+  ) => Promise<{ isError?: boolean; details: unknown }>;
+  const dir = await mkdtemp(join(tmpdir(), "rf-tooldetails-"));
+  const result = await execute("id", { task: "fix the auth bug" }, null, null, { cwd: dir });
+  assert.equal(result.isError, undefined);
+  const details = result.details;
+  assert.ok(typeof details === "object" && details !== null, "the tool must return details");
+  assert.ok("runId" in details && typeof details.runId === "string", "details must name the run");
+  assert.ok("groups" in details && Array.isArray(details.groups), "details must carry dispatch groups");
+  assert.ok(details.groups.length > 0, "a build plan has dispatch groups");
+  const first = details.groups[0];
+  assert.ok(typeof first === "object" && first !== null && "agents" in first && Array.isArray(first.agents));
+  const seat = first.agents[0];
+  assert.ok(typeof seat === "object" && seat !== null);
+  assert.ok("name" in seat && typeof seat.name === "string" && seat.name.length > 0, "each item carries its roster name");
+  assert.ok("agent" in seat && typeof seat.agent === "string" && seat.agent.startsWith("rf-"));
+  assert.ok("artifact" in seat && typeof seat.artifact === "string");
+  assert.ok("wave" in first && first.wave === 1);
 });
 
 test("the tool schema refuses a blank task, as the command already does", async () => {
@@ -645,12 +679,12 @@ test("a child session must not wipe the parent's model baseline; a new session m
   // fires `session_start`. A reset from a child would hand the parent a run with
   // no baseline mid-flight, silencing every later divergence.
   host.handlers.get("session_start")!({}, { agent: { kind: "sub", name: "task" }, ui: { notify: () => {} } });
-  assert.equal(hostToolResult(host, { toolName: "task", details: diverged("other-a/model") }).length, 1);
+  assert.equal((await hostToolResult(host, { toolName: "task", details: diverged("other-a/model") })).length, 1);
 
   // A real new session starts clean: the previous run's plan is not this run's
   // expectation, and reporting against it would be a false alarm.
   host.handlers.get("session_start")!({}, { agent: { kind: "main", name: "main" }, ui: { notify: () => {} } });
-  assert.deepEqual(hostToolResult(host, { toolName: "task", details: diverged("other-b/model") }), []);
+  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: diverged("other-b/model") }), []);
 });
 
 test("a child session planning must not overwrite the parent's baseline", async () => {
@@ -682,7 +716,7 @@ test("a child session planning must not overwrite the parent's baseline", async 
 
   // A parent seat settling on a different model is still measured against the
   // parent's plan, so it reports a named baseline instead of losing it.
-  const notices = hostToolResult(host, { toolName: "task", details: diverged });
+  const notices = await hostToolResult(host, { toolName: "task", details: diverged });
   assert.equal(notices.length, 1, "the parent's divergence went unreported");
   assert.ok(!notices[0]!.text.includes("no plan-time baseline"), notices[0]!.text);
   assert.match(notices[0]!.text, /planned `mock\/role-/, notices[0]!.text);
@@ -706,6 +740,54 @@ test("registered surfaces carry the fields omp requires", () => {
   }
 });
 
+test("a failed dispatch is reported as emitted-but-not-dispatched", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-nodispatch-"));
+  const host = stubHost({ sendMessageThrows: true });
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  const { ctx, notices } = commandCtx(dir);
+  await handler("fix the auth bug", ctx);
+  assert.ok(
+    notices.some((n) => n.level === "error" && n.text.includes("dispatch failed")),
+    `a failed send must surface: ${JSON.stringify(notices)}`,
+  );
+  assert.ok(notices.some((n) => n.text.includes("emitted")), "the error must say definitions exist");
+});
+
+test("report and runs read the manifest, and report-the-word is still a task", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-reportcmd-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+
+  const planned = commandCtx(dir);
+  await handler("audit the deps", planned.ctx);
+  assert.ok(planned.notices.some((n) => n.text.includes("Gate: approve")), "the run must plan");
+
+  const report = commandCtx(dir);
+  await handler("report", report.ctx);
+  assert.ok(report.notices.some((n) => /^Run run-\d+/.test(n.text)), JSON.stringify(report.notices));
+  assert.ok(report.notices.some((n) => n.text.includes("Outcomes (0/")), "a fresh run has no outcomes yet");
+
+  const list = commandCtx(dir);
+  await handler("runs", list.ctx);
+  assert.ok(list.notices.some((n) => n.text.includes("Recent role-fleet runs")), JSON.stringify(list.notices));
+
+  const status = commandCtx(dir);
+  await handler("status", status.ctx);
+  assert.ok(status.notices.some((n) => /0\/\d+ settled/.test(n.text)), JSON.stringify(status.notices));
+
+  const doctor = commandCtx(dir);
+  await handler("doctor", doctor.ctx);
+  assert.ok(doctor.notices.some((n) => n.text.includes("specialist tier")), JSON.stringify(doctor.notices));
+
+  // "report the bug" is a task, not the subcommand: the word only acts as a
+  // subcommand alone or followed by a run id.
+  const task = commandCtx(dir);
+  await handler("report the bug", task.ctx);
+  assert.ok(task.notices.some((n) => n.text.includes("Gate: approve")), JSON.stringify(task.notices));
+});
+
 test("the plan tool declares every parameter its execute reads", () => {
   const host = stubHost();
   roleFleet(host.pi as never);
@@ -718,7 +800,7 @@ test("the plan tool declares every parameter its execute reads", () => {
   // Every key the execute body reads. Kept in step with the schema by hand, which
   // is the point: a parameter that is read but not declared arrives as undefined
   // at runtime and fails silently, so this list is the guard against that.
-  for (const key of ["task", "maxRoles", "allowlist", "dryRun", "council", "models", "consul", "reviewOnly"]) {
+  for (const key of ["task", "maxRoles", "allowlist", "dryRun", "council", "models", "consul", "reviewOnly", "slices"]) {
     assert.ok(declared.includes(key), `role_fleet_plan does not declare "${key}": ${declared.join(", ")}`);
   }
 });
@@ -1072,12 +1154,13 @@ test("the command says something while it plans, and clears it afterwards", asyn
 async function runWithDialog(
   args: string,
   ask: (items: DialogItem[]) => DialogAnswer,
+  models?: { resolve(spec: string): { provider: string; id: string } },
 ): Promise<{ sent: string; notices: Array<{ text: string; level: string }> }> {
   const dir = await mkdtemp(join(tmpdir(), "rf-dialog-"));
   const host = stubHost();
   roleFleet(host.pi as never);
   const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
-  const base = commandCtx(dir, { ask });
+  const base = commandCtx(dir, { ask, ...(models ? { models } : {}) });
   await handler(args, base.ctx);
   return { sent: host.sent.at(-1)?.message ?? "", notices: base.notices };
 }
@@ -1097,6 +1180,23 @@ test("the preset screen hands the pipeline the seats that preset names", async (
   });
   assert.ok(sent.length, "the run must dispatch");
   assert.ok(!sent.includes("rf-implementer"), `the implementer was dispatched anyway:\n${sent.slice(0, 400)}`);
+});
+
+test("the consent question names a collapsed council", async () => {
+  // Plan notes print after the dialog, so a warning there cannot inform the
+  // spend decision. Aliases that all resolve to one model must say so on the
+  // screen where the user approves N paid runs.
+  const asked: string[] = [];
+  await runWithDialog(
+    "review the auth module --council 3",
+    (items) => {
+      const cast = items.find((i) => i.id === "cast")!;
+      asked.push(cast.question);
+      return submit("cast", [cast.options[0]!.label]);
+    },
+    { resolve: () => ({ provider: "mock", id: "one-model" }) },
+  );
+  assert.match(asked[0] ?? "", /1 distinct model across 3 reviewers/, asked[0] ?? "");
 });
 
 test("the seat picker maps labels back to ids and an empty choice abandons", async () => {
@@ -1122,21 +1222,53 @@ test("the seat picker maps labels back to ids and an empty choice abandons", asy
 });
 
 test("the cast screen names who can write before anything is spent", async () => {
-  // A `--consul` run grants the council repo-wide write so their reports reach
-  // the deciding seat. That grant used to be invisible on the screen asking for
-  // consent: the roster showed models only, and per-seat authority sat one
-  // dialog deeper, on the deliberately non-default path.
+  // Authority is two tiers now: only `edit` can change a file, and a council
+  // member holds nothing extra. That fact used to be invisible on the screen
+  // asking for consent — the roster showed models only, and per-seat authority
+  // sat one dialog deeper, on the deliberately non-default path.
   const asked: string[] = [];
+  const lines: string[] = [];
   await runWithDialog(
     "refactor the auth module --models (xai/grok-4,zai/glm-5) --consul anthropic/claude-opus-4-6",
     (items) => {
       const cast = items.find((i) => i.id === "cast")!;
       asked.push(cast.question, ...cast.options.flatMap((o) => [o.description, o.preview ?? ""]));
+      for (const o of cast.options) lines.push(...(o.preview ?? "").split("\n").filter(Boolean));
       return submit("cast", [cast.options[0]!.label]);
     },
   );
   const screen = asked.join("\n");
-  assert.match(screen, /repo-wide write/, `the dialog hid the write grant:\n${screen}`);
+  // One seat of the six can change the code (the implementer), and it is also the
+  // one holding a shell, so the question names both facts before anything is
+  // spent rather than folding the shell into the editor count.
+  assert.match(
+    screen,
+    /\b1 of 6 seat\(s\) can change the code, 1 of them with a shell/,
+    `the dialog hid who can write:\n${screen}`,
+  );
+  // Every roster line names its own tier, and the line is the last word on it:
+  // a reader who never opens the picker still learns who changes files.
+  for (const line of lines) {
+    assert.match(
+      line,
+      /— (read-only|can change the code|can change the code and run commands)$/,
+      `no authority on a roster line: ${line}`,
+    );
+  }
+  assert.ok(
+    lines.some((l) => l.endsWith("— can change the code and run commands")) && lines.some((l) => l.endsWith("— read-only")),
+    `both tiers must be named: ${lines.join(" | ")}`,
+  );
+
+  // The zero branch of the same sentence: a cast where nobody edits must not
+  // read as "0 of N seat(s)", which implies an editor exists.
+  const review: string[] = [];
+  await runWithDialog("review the auth module --council 2", (items) => {
+    const cast = items.find((i) => i.id === "cast")!;
+    review.push(cast.question);
+    return submit("cast", [cast.options[0]!.label]);
+  });
+  assert.match(review.join("\n"), /no seat can change the code/, `the dialog hid who can write:\n${review.join("\n")}`);
 });
 
 test("a dry run shows the cast without asking", async () => {

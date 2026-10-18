@@ -73,18 +73,20 @@ them: each agent shows its resolved model, status, and token usage as it works.
 
 | Flag | What it does |
 |---|---|
-| `--dry-run`, `-n` | Plan only. Writes nothing. |
+| `--dry-run`, `-n` | Plan only. Writes nothing, and skips the specialist tier — that tier is a paid model call. |
 | `--council [N]` | Replace the single reviewer with N reviewers on different models (max 3). |
 | `--models (a,b,c)` | Run the review seats on exactly these models, in this order (max 5). |
 | `--consul MODEL` | Model that reconciles the council's reports. Default: your session model. |
 | `--review-only` | Scout and review seats only. No seat can edit the code. |
-| `--max-roles N` | Cap on generated roles (default 4, hard max 8). |
+| `--max-roles N` | Cap on generated roles (min 2, default 4, hard max 8). |
+| `--slices N` | Fan the implementation out across N writer seats in one parallel wave (max 4). |
 | `--allowlist FILE` | Pin models to a file instead of using `@` aliases. A leading `~` is expanded. |
 
 A value past a flag's ceiling is clamped to it, never dropped, and the clamp is
-reported in the plan's notes rather than applied silently. A non-numeric value is
-refused the same way, and the word stays in the task text instead of being
-swallowed as a bogus number.
+reported as a warning when the flag is parsed — the plan is built from the
+clamped value, so its notes describe the cast that ships rather than repeating
+the parser's message. A non-numeric value is refused the same way, and the word
+stays in the task text instead of being swallowed as a bogus number.
 
 Two of these are worth explaining, because they change the rules rather than the
 details.
@@ -185,12 +187,14 @@ cannot leave a tester waiting on an implementer that is not running.
 ## Confirming the cast
 
 Every seat is a paid run, so nothing is written and nothing is dispatched until
-you have seen the cast. The cast is proposed by rule — same task, same flags,
-same seats, every time — and you confirm it:
+you have seen the cast. The static cast is proposed by rule — same task, same
+flags, same seats, every time — and you confirm it. (When the paid specialist
+tier runs, its proposal is a model call and is not deterministic; `--dry-run`
+skips that tier, so a dry cast is the static floor.)
 
 ```text
 Run 7 seat(s) on @smol, @plan, @task, xai-oauth/grok-4.5, zai/glm-5.3, minimax-code/MiniMax-M3.1?
-1 seat(s) can edit code, 4 hold repo-wide write and could overwrite any path.
+1 of 7 seat(s) can change the code, 1 of them with a shell: any command, any path.
 
 ○ Run all of them  (Recommended)
     All seats, exactly as planned.
@@ -199,17 +203,17 @@ Run 7 seat(s) on @smol, @plan, @task, xai-oauth/grok-4.5, zai/glm-5.3, minimax-c
       Planner — turns the investigation into a locked implementation plan
         (@plan — unresolved) — read-only
       Implementer — implements the plan with the smallest correct change
-        (@task — unresolved) — can change the code
+        (@task — unresolved) — can change the code and run commands
       Reviewer 1 — reviews the change for correctness, scope, and evidence
-        (xai-oauth/grok-4.5) — holds repo-wide write — can create or overwrite any path
+        (xai-oauth/grok-4.5) — read-only
       Reviewer 2 — reviews the change for correctness, scope, and evidence
-        (zai/glm-5.3) — holds repo-wide write — can create or overwrite any path
+        (zai/glm-5.3) — read-only
       Reviewer 3 — reviews the change for correctness, scope, and evidence
-        (minimax-code/MiniMax-M3.1) — holds repo-wide write — can create or overwrite any path
+        (minimax-code/MiniMax-M3.1) — read-only
       Consul — reconciles the council's reports into one verdict (zai/glm-5.3)
-        — holds repo-wide write — can create or overwrite any path
+        — read-only
 ○ Look, don't touch
-    Drops Implementer — no seat can edit code, and nothing here can write at all.
+    Drops Implementer — no seat can change the code.
     Reviewer 1, Reviewer 2, Reviewer 3, Consul go too: nothing left for them to do.
       Investigator — … — read-only
       Planner — … — read-only
@@ -232,27 +236,39 @@ sentence. The preview is the field that keeps its lines.
 
 Each seat says what it does, the model it runs on, and the authority it holds,
 because a seat id tells you neither the provider — `@slow` and `@task` say what
-class of work a seat is for, not who answers — nor the grant. Three authorities are
-distinguished, because they are three different risks:
+class of work a seat is for, not who answers — nor the grant. Three authorities
+are distinguished, because there are three:
 
 | Grant | The screen says |
 |---|---|
-| `edit` | *can change the code* |
-| `write` without `edit` | *holds repo-wide write — can create or overwrite any path* |
+| `bash` | *can change the code and run commands* |
+| `edit` (+ `write`) | *can change the code* |
 | neither | *read-only* |
 
-The middle row is not a cosmetic distinction. A council member gains `write` when a
-consul is appointed, so its report reaches the filesystem for the deciding seat to
-read; the seat's own brief calls that "writes its own report", and nothing in the
-grant scopes it to that path. Naming the purpose as if it were the boundary would
-make the consent screen understate what the run may touch, so the grant is named,
-and the cast question says how many seats hold it.
+The shell gets its own phrase rather than being folded into the editor count,
+because it is the wider grant: a seat holding `edit` changes the files it was
+pointed at, while a shell can write any path it can name, delete what it can
+reach and run anything else on the machine. A definition's `tools` list is the
+seat's whole toolset — it replaces the default set rather than extending it — so
+this screen is the one place a reader learns that the implementer and the tester
+can do that. Only the seats whose own acceptance requires running something hold
+it: the implementer (and the migration runner, which is the implementer seat
+under another id, and a proposed writer), and the tester, whose brief says "exact
+commands run". The scout, planner, reviewer, council, consul and the docs seat
+read and edit files without a shell.
+
+The `write`-without-`edit` tier a council member used to hold when a consul was
+appointed is gone, and that is a different story from this one: it existed so
+`review-c1.md` would reach the filesystem, and omp's `write` tool takes any path,
+so the screen had to spell out *holds repo-wide write — can create or overwrite
+any path* to keep the consent honest. The report now reaches that path the way the
+scout's always has — the dispatch tells the orchestrator to write each settled
+`report` before the next wave — so the council is read-only and the reaching is
+done by the seats that were already allowed to write.
 
 **Look, don't touch** drops the seats that can change the code and keeps the ones
-that cannot. A council member that writes its own report for the consul to read is
-*kept*: dropping it would leave the review with nobody doing it. It is kept under its
-real grant, and the choice names the repo-wide writers that remain — the option
-removes the editors, not every writer.
+that cannot — including every council member and the consul, whose reports are
+files the orchestrator places rather than the seat writes.
 
 **Choose each seat yourself** opens one row per seat with the same three facts,
 plus the wave it lands in. Removing a seat takes its dependents with it: you
@@ -262,8 +278,10 @@ in the plan's notes, so the dispatch record says what actually ran.
 
 **This screen is interactive-only.** `askDialog` does not exist in print or RPC
 mode, so those hosts dispatch straight through — which is what the flags are for.
-`--dry-run` shows the same cast without asking, for when you would rather read
-than answer.
+`--dry-run` shows the cast without asking, for when you would rather read
+than answer. It also skips the specialist tier, which is a paid model call — so
+on a task that would have earned a proposal, the dry cast is a lower bound rather
+than the cast you would actually run.
 
 **While it plans, the status line animates.** Choosing the cast can include a
 model call for extra roles, and a command that goes quiet for several seconds
@@ -343,8 +361,10 @@ alias resolved to nothing has no baseline to diverge from, so an ordinary run
 there prints nothing rather than a false alarm.
 
 Scope, so the line is not over-read: it covers seats this plugin emitted (the
-`rf-` prefix), reports one model per seat once per dispatch, and it is a
-notification, not a stored log — the plan's model table is the baseline.
+`rf-` prefix) and reports one model per seat once per dispatch. The same settled
+result is also appended to the run manifest, so the notification is no longer
+the only record: `/role-fleet report` reads back which model ran, whether it was
+a fallback, the seat's verdict, and its tokens and duration.
 
 Seats are not asked which model they are on. A subagent's prompt carries no
 model name — its only source would be the pinned selector in its brief, which is
@@ -452,13 +472,12 @@ report and the reviewers' previews are not the thing to read.
 
 **A named channel for a report nobody can write.** A read-only seat has no `write`
 tool, so its declared artifact — `scout.md`, the file every downstream brief says
-to read first — cannot be created by the seat that owns it. The dispatch instructions
-list those paths and tell the orchestrator to write each settled report to its path
-before starting the next wave. Before that list existed the promise lived only in
-the seat's own brief, a document the orchestrator never opens, and the observed
-result was a run directory with five agent files in it and no report: the
-instruction was a convention, and the convention was invisible to the one actor
-that had to carry it out.
+to read first — cannot be created by the seat that owns it. The plugin now
+places that report itself: when a generated seat settles, the `tool_result`
+hook writes its full `report` (or, without a structured payload, its output) to
+the artifact path before the next wave can read it. The dispatch text still
+names the paths, but the channel no longer depends on the orchestrator
+remembering to copy them. A seat that *can* write still writes its own file.
 
 ---
 
@@ -501,25 +520,27 @@ name like `sonnet` is indistinguishable from a task word, so it goes in the `=`
 form (`--consul=sonnet`), where you separated the value yourself. A blank one is
 no consul: the seat is left out and the plan says the session model will
 synthesize, rather than pinning a deciding seat on a selector the host cannot
-resolve — and it never hands the council repo-wide `write` for a seat that cannot
-run.
+resolve.
 
-The reviewers gain `write` when a consul is present — write only, no `edit`.
-That is not a convenience: a read-only seat returns its report as a yield payload,
-so `review-c1.md` would be a path nobody ever writes and the consul would have
-nothing to read.
+The consul's reports are files the orchestrator places, not files the seats write.
+A read-only seat returns its report as a yield payload and `review-c1.md` would
+otherwise be a path nobody creates — so the dispatch names every read-only seat's
+artifact path and tells the orchestrator to write each settled `report` there
+before starting the next wave, exactly as it does for the scout and the planner in
+every run. The consul's brief lists the members' artifacts as upstream reads and
+that list is resolvable by the time its wave starts.
 
-The grant is not scoped to that path. omp's `write` tool takes any path, so a
-council member in a consul run can create or overwrite any file in the repo; what
-confines it to its report is the seat's acceptance line, which is a convention and
-not a boundary. Because the difference is one a user is consenting to, it is stated
-where the consent is taken — in the cast question, in the roster line for each seat,
-and in the plan note that names the grant — rather than being left implicit in the
-word "writes".
-
-`--consul` therefore cannot be combined with a promise that nothing can touch the
-tree. "Look, don't touch" drops every `edit` seat and keeps the repo-wide writers
-with the label that says what they hold.
+This used to be solved by granting the council `write` — write only, no `edit` — so
+each member wrote its own report. That grant is gone. It was redundant (the
+placement channel above already existed and already carried the scout's report) and
+it was unscoped: omp's `write` tool takes any path, so a council member in a consul
+run could create or overwrite any file in the repo, with nothing but its acceptance
+line confining it. Now no seat the plugin emits holds a write it was not asked to
+do: the writers are the seats the plan called for — the implementer and its
+stand-ins, the tester, the docs seat when a document is the change — and
+everything else is read-only. `--consul` therefore no longer widens the run's
+authority at all, and "Look, don't touch" is a promise about the grants that
+change a file, not about one tool name.
 
 Two costs worth naming before you use it: it is one more paid run, and it is
 exempt from `--max-roles` (a cap that dropped the deciding seat would silently
@@ -532,6 +553,39 @@ dropping reviewers to fit a budget would silently undo the review you asked for
 (the plan says so in a note when the exempt roles push the real count past the
 cap); and on analysis-only tasks its members join after the scout rather than
 replacing a reviewer that was never going to exist.
+
+---
+
+## Slice fan-out
+
+```text
+/role-fleet refactor the auth module across several files --slices 3
+```
+
+`--slices N` replaces the single implementer with N writer seats
+(`implementer-1` …) that go out in **one parallel wave**. Everything that reports
+on the change — the tester, the reviewer, the docs seat, the council — waits on
+every one of them, so nothing reviews a third of the work, and the fan-out counts
+as the implementer's single seat against `--max-roles`: spending a slot per writer
+*file* would drop the tester and the reviewer first, which is the opposite of what
+a multi-writer change needs.
+
+The one thing the plugin cannot decide for you is which files each seat owns. That
+map is in the scout's report, which the orchestrator reads before the wave is
+dispatched, so the dispatch names each slice seat and says to give it the exact
+files it owns and no others. What confines a seat to its set is its brief, and a
+brief is a convention — the same convention as "one writer per file" everywhere
+else in this run. Two writer seats on one file is the defect the cast is arranged
+to avoid, which is why the assignment is stated rather than left to the seats to
+negotiate.
+
+Three refusals are worth knowing before you reach for it. A migration runs as one
+writer by design, so `--slices` on a migration reports that there is no implementer
+to fan out; a docs or analysis cast has no implementer either and says the same;
+and a **proposed** specialist that holds write is refused on a fanned-out plan,
+because that cast already has every writer it can keep apart. The flag is bounded
+at 4 — each seat is a concurrent paid writer, and past a handful no dispatch item
+is likely to get a genuinely disjoint set of files.
 
 ---
 
@@ -557,9 +611,21 @@ flowchart TD
 ```
 
 1. **Synthesize** — the shape of the task decides the cast: investigation,
-   planning (multi-file work only), implementation, tests, review, docs. A role
-   cap (default 4) bounds the fan-out; when it bites, the implementer is the last
-   role dropped.
+   planning (multi-file work only), implementation, tests, review, docs. The
+   vocabulary is one table (`VOCAB` in `core.ts`), and it separates verbs from
+   nouns on purpose: `add`, `fix`, `update`, `refactor` ask for a change and mint
+   the code cast, `research`, `investigate`, `audit`, `analyse`, `explain` ask to
+   look and thin the builder seats out, and a bare subject — `api`, `module`,
+   `test` — mints nothing by itself. "explore the api surface" is an investigation
+   that used to ship an implementer. Three shapes are their own cast: a
+   documentation ask with no code subject (`update the readme`) gets the docs seat
+   and no implementer, a request to run checks (`test the checkout flow`) gets the
+   tester and no implementer, and UI work gets the designer, which takes the seat a
+   separate tester would have held. A role cap (default 4) bounds the fan-out; when
+   it bites, the implementer is the last role dropped.
+   A task that matches none of it — an unknown verb, or another language — yields a
+   single investigator, and the plan says what became of the tier that would have
+   improved it: the thinness is reported, never silent.
 2. **Bind** — each role takes an alias: recon and test runs ride `@smol`
    (mechanical work), planning rides `@plan`, implementation rides `@task` — the
    planner already did the heavy thinking, and an executor of a locked plan does
@@ -632,12 +698,18 @@ fills the cap and the auditor is the one dropped, with a note saying so; raise
 > whatever model your session is already using.
 
 **Generated** — dynamic and validated. When the static cast is clearly thin for
-the task, one cheap ephemeral model call proposes up to three specialist roles as
-JSON. A proposal can never invent a model (aliases only), a tool outside the grant
-list, a dependency that does not resolve, or a role count past the cap; one
-invalid element discards the whole proposal. Every rejection is a note on the plan,
-never a silence — a request the cast quietly decided not to fill is the failure mode
-this pipeline reports everywhere else.
+the task — nothing but an investigator, because the task matched no shape the
+vocabulary knows, or an analysis cast of at least five words with room for a
+specialist — one cheap ephemeral model call proposes up to three specialist roles
+as JSON. The trigger is the *cast*, not the analysis flag: a degenerate cast
+carries `analysisOnly: false` too, so keying the tier on the flag alone left
+exactly the plans that needed it with no second chance. A proposal can never
+invent a model (aliases only), a tool outside the grant list, a dependency that
+does not resolve, or a role count past the cap; one invalid element discards the
+whole proposal. Every rejection is a note on the plan, never a silence — a request
+the cast quietly decided not to fill is the failure mode this pipeline reports
+everywhere else. `--dry-run` does not run this tier at all, since it is a paid
+call and the flag promises a cast without spending.
 
 An analysis-only plan also rejects a proposed **writer**. `--review-only` turns the
 tier off entirely, but a council is analysis-only without saying so: naming
@@ -648,29 +720,69 @@ naming them — while the read-only proposals from the same reply still merge.
 
 ---
 
+## Reading a run back
+
+Every non-dry run writes `.role-fleet/run-<id>/plan.json` before dispatch and
+updates it as seats settle. The record holds the cast, models, waves, notes,
+plugin version, and one outcome per seat: planned vs actual model, fallback
+flag and route, exit code, error, verdict, tokens, requests, and duration.
+
+```text
+/role-fleet report            # newest run
+/role-fleet report run-…      # one run by id
+/role-fleet status            # settled / failed / missing seats of the newest run
+/role-fleet runs              # the ten most recent runs
+/role-fleet doctor            # which optional host APIs this session has
+```
+
+Read-only seats' reports are placed at their artifact paths from the settled
+result, so a finished run's directory contains the deliverables themselves, not
+only the definitions that would have produced them. The manifest is local and
+gitignored like the rest of `.role-fleet/`; retention still keeps the newest ten
+run directories.
+
 ## Safety notes
 
 - **No secrets.** The package has zero runtime dependencies and the only host
   import is type-only, so nothing from your environment is pulled in.
-- **The plugin's own writes are scoped.** Planning touches exactly two places:
-  generated agents land in `<repo>/.omp/agents/rf-*.md`, and each run pre-creates
-  its own artifact directory `<repo>/.role-fleet/run-<id>/`, so a worker never
-  inherits a missing parent. That tree is bounded: the newest **10** run
-  directories are kept and older ones deleted on the next run — by count, not by
-  age, since count is what bounds the damage. Nothing the plugin did not name will
-  it delete: prune removes only `run-<digits>` directories, and never the current
-  run or one newer than it — a newer id belongs to a run still in flight, so a
-  burst of concurrent runs cannot delete an in-flight run's artifacts. Pruning of
-  agent files likewise only ever deletes files carrying this plugin's own
-  generated marker *and* whose frontmatter name matches their filename.
-- **The seats' writes are not scoped, and the screen says so.** A dispatched seat
-  holds `edit` and `write` when the plan calls for a builder, and both tools take
-  any path in the repo — neither is bound to the seat's artifact. The per-file
-  discipline ("one writer per seat", "write only your own report") lives in the
-  seat's brief and acceptance list, which is a convention a model is asked to
-  follow, not a limit the host enforces. So the confirmation screen states each
-  seat's grant instead of promising the run cannot touch the tree, and `--consul`
-  says plainly that it grants the council repo-wide `write`.
+- **The plugin's own writes are scoped.** Planning touches exactly three places:
+  generated agents land in `<repo>/.omp/agents/rf-*.md`, each run pre-creates its
+  own artifact directory `<repo>/.role-fleet/run-<id>/`, so a worker never inherits
+  a missing parent, and that directory gains a `plan.json` — the run's own record of
+  the cast, its models, its waves, its notes and, as seats settle, their
+  outcomes. That tree is bounded: the newest
+  **10** run directories are kept and older ones deleted on the next run — by
+  count, not by age, since count is what bounds the damage. Nothing the plugin did
+  not name will it delete: prune removes only `run-<digits>` directories, and never
+  the current run or one newer than it — a newer id belongs to a run still in
+  flight, so a burst of concurrent runs cannot delete an in-flight run's artifacts.
+  Pruning of agent files likewise only ever deletes files carrying this plugin's own
+  generated marker, whose frontmatter name matches their filename, and which are not
+  owned by a newer run.
+- **A file the plugin does not own is never written over.** The emit pass asks the
+  same question the prune asks — is this file this run's to replace? — and a
+  hand-written `.omp/agents/rf-<seat>.md`, or a file belonging to a newer run, is
+  left alone: the seat is emitted as `rf-<seat>-2.md` instead, and the plan's notes
+  say which file was kept and under what name the seat runs. One predicate, two
+  callers, so emit overwrites exactly what prune deletes and nothing else.
+- **The seats' writes are not scoped, and the screen says so.** A seat that can
+  change the code holds `edit` — which takes any path in the repo, not the one it
+  was pointed at — or a shell, which is wider still: `bash` can write, delete or
+  execute whatever it can name, and nothing in the grant confines it to the
+  seat's own artifact. The per-file discipline ("one writer per file") lives in
+  the seat's brief and acceptance list, which is a convention a model is asked to
+  follow rather than a limit the host enforces. Only the seats whose acceptance
+  requires running something hold the shell: the implementer (and the migration
+  runner, which is that seat under another id) and the tester, the two whose
+  briefs ask for commands and their output. That shell runs unattended — the host
+  disables per-command approval inside a dispatched subagent, on the reasoning
+  that the dispatch itself is the authorization boundary — so the cast screen is
+  where it is consented to, which is why the shell has a phrase of its own there
+  and is counted separately from the editors. Every other seat the plugin emits
+  can read, search and edit-if-granted but cannot run anything, yields its report
+  and has the orchestrator place it. So the confirmation screen names each seat's
+  authority — shell, editor or read-only — instead of promising the run cannot
+  touch the tree.
 - **Prune-safe.** A hand-written `agent.md`, or a generated one you renamed, is
   never deleted.
 - **`role_fleet_plan` is `approval: "write"`**, because it does write files. Under
@@ -681,20 +793,30 @@ naming them — while the read-only proposals from the same reply still merge.
 - **Two fleets in one repo share one set of agent filenames.** `emitAgents` writes
   `rf-<role>.md`, keyed by seat id rather than run id, because omp discovers agent
   definitions by scanning one flat directory and never descends. A second
-  `/role-fleet` started while the first council is still running overwrites the
-  shared seat names; the run-stamp guard stops the *older* run's prune from
-  deleting the newer run's files, but it cannot stop the clobber. Concurrent
-  fleets in one working tree are not supported — use separate worktrees. The same
-  clash has a second shape across *processes*: run ids are strictly increasing
-  inside one process, so two runs started in different processes within the same
-  millisecond mint the same `run-<ms>` and neither guard sees the other as newer.
+  `/role-fleet` started while the first council is still running therefore collides
+  with the first run's seats — in both directions, and the second is the one to
+  know about: the newer run's prune deletes the *older* run's agent files wherever
+  its own narrower cast does not replace them, so the older run's later waves fail
+  with an unknown agent. The prune guard only expresses "spare a file a newer run
+  owns", which is what stops the reverse. Files this run does not own are no longer
+  overwritten (`rf-<seat>-2.md` and a note instead), but a *deletion* is not
+  something a note can undo. Concurrent fleets in one working tree are not
+  supported — use separate worktrees. The same clash has a third shape across
+  *processes*: run ids are strictly increasing inside one process, so two runs
+  started in different processes within the same millisecond mint the same
+  `run-<ms>` and neither guard sees the other as newer.
 - **Two main-session runs share one model-observation baseline.** A settled `task`
   result carries an agent name and no run id, so nothing in the payload tells seat
   X of plan A from seat X of plan B. The later dispatch records its expectations and
   the earlier run's remaining seats are reported without a baseline — stated, not
-  guessed. Subagent sessions are kept out of the recording path entirely, which is
-  the case that both could not be reasoned about correctly and mattered most, since
-  a write-granted council member holds the plan tool.
+  guessed. With overlapping runs the usual outcome is worse than a missing
+  baseline: the seat settles on the model plan A pinned it to and is compared
+  against plan B's pin for the same name, so the line can report a "model changed"
+  that did not happen. Nothing in the payload distinguishes the two, which is why
+  this is a limitation rather than a bug to fix here. Subagent sessions are kept out
+  of the recording path entirely, which is the case that both could not be reasoned
+  about correctly and mattered most, since a write-granted council member holds the
+  plan tool — a role that no longer exists, as the council is read-only now.
 
 ---
 
@@ -707,7 +829,9 @@ npm run typecheck
 ```
 
 Before publishing, `npm pack --dry-run` should list exactly `package.json`,
-`README.md`, `LICENSE` and `src/**` — nothing else.
+`README.md`, `CHANGELOG.md`, `LICENSE` and `src/**` — nothing else. Release
+notes live in `CHANGELOG.md`, and `prepublishOnly` runs the suite and the
+typecheck before a tarball can be cut.
 
 ## License
 

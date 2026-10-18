@@ -8,10 +8,12 @@
  * RoleSpec — the rest of the pipeline treats it like any other role.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-import { READ_TOOLS, WRITE_TOOLS } from "./core.ts";
+import { BUILD_TOOLS, grantsWrite, READ_TOOLS, VOCAB, WRITE_TOOLS } from "./core.ts";
 
 export interface Specialist {
-  /** Matched against the task text; a specialist joins the plan when it hits. */
+  /** Matched against the task text; a specialist joins the plan when it hits.
+   *  Every pattern comes from `core.VOCAB`, so a seat's trigger and the cast's
+   *  own reading of the same words cannot drift apart. */
   match: RegExp;
   /** Replaces the implementer instead of adding a role (migration case). */
   replacesImplementer?: boolean;
@@ -20,7 +22,7 @@ export interface Specialist {
 
 export const SPECIALISTS: Specialist[] = [
   {
-    match: /\b(landing|ui|ux|design|mockup|wireframe|layout|frontend page|web page)\b/i,
+    match: VOCAB.image,
     spec: {
       id: "designer",
       title: "Designer",
@@ -42,7 +44,7 @@ export const SPECIALISTS: Specialist[] = [
     },
   },
   {
-    match: /\b(security|vulnerab|pentest|injection|xss|csrf|exploit|threat model)\b/i,
+    match: VOCAB.security,
     spec: {
       id: "security-auditor",
       title: "Security auditor",
@@ -62,7 +64,7 @@ export const SPECIALISTS: Specialist[] = [
     },
   },
   {
-    match: /\b(migrat\w*|port from|upgrade (the )?(deps|dependencies|framework)|move off)\b/i,
+    match: VOCAB.migration,
     replacesImplementer: true,
     spec: {
       id: "migration-runner",
@@ -75,7 +77,9 @@ export const SPECIALISTS: Specialist[] = [
         "Focused checks pass on the migrated code",
         "No behavior change beyond the migration",
       ],
-      tools: WRITE_TOOLS,
+      // The implementer seat under another id, so it carries the implementer's
+      // grant: "focused checks pass on the migrated code" needs a shell.
+      tools: BUILD_TOOLS,
       effort: "high" as Effort,
       needsVision: false,
       model: "@task",
@@ -144,7 +148,7 @@ export function applySpecialists(
     // defeated the audit thinning one line after it ran, and killed the
     // designer for exactly the task it exists to serve.
     const grants = specialist.spec.tools ?? [];
-    if (analysisOnly && grants.some((t) => t === "write" || t === "edit")) {
+    if (analysisOnly && grantsWrite(grants)) {
       notes.push(`${specialist.spec.id}: analysis-only plan; no write seat added`);
       continue;
     }

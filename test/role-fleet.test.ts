@@ -14,12 +14,12 @@ import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { aliasFor, bindFleet, isCouncilMember, planWaves, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
+import { aliasFor, bindFleet, isCouncilMember, MAX_SLICES, planWaves, READ_TOOLS, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
 import { gatePlan } from "../src/gate.ts";
 import { agentMarkdown, dispatchGroups, emitAgents, pruneGeneratedAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
-import { parseFlags } from "../src/index.ts";
+import { parseFlags } from "../src/flags.ts";
 import { renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
 
 function planFor(task: string, maxRoles?: number) {
@@ -229,16 +229,31 @@ test("a list shorter than the council says which members fell back to an alias",
   );
 });
 
-test("a named list on an analysis-only plan says there is no reviewer to retarget", async () => {
+test("a named list on an analysis-only plan retargets the reviewer the cast now has", async () => {
+  // An analysis cast that would otherwise be `[scout]` earns a reviewer of its
+  // own, so the cast this list lands on is never seatless: the seat exists, and
+  // a second reviewer on the same work would be a duplicate review rather than
+  // a wider one.
   const result = await runRoleFleet({
     task: "explain how the adapter layer works",
     cwd: await mkdtemp(join(tmpdir(), "rf-analysis-")),
     models: ["xai/grok-4"],
   });
   assert.equal(result.ok, true);
+  const reviewer = result.plan!.roles.find((r) => r.core === "reviewer");
+  assert.ok(reviewer, `the analysis cast must have a seat to retarget: ${result.plan!.roles.map((r) => r.id).join(", ")}`);
+  assert.equal(reviewer!.model, "xai/grok-4");
+  // The user named a model for a reason, so the run says which seat it moved
+  // and what it moved from. The no-op note is the failure here, not the absence
+  // of a reviewer: `had no reviewer seat to apply to` would mean the list was
+  // silently discarded.
   assert.ok(
-    result.plan!.notes.some((n) => n.includes("--models") && n.includes("no reviewer")),
+    result.plan!.notes.some((n) => n.includes("reviewer on xai/grok-4") && n.includes("@slow")),
     `a silent no-op is the failure here: ${result.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !result.plan!.notes.some((n) => n.includes("had no reviewer seat to apply to")),
+    `the list was dropped instead of retargeting: ${result.plan!.notes.join(" | ")}`,
   );
 });
 
@@ -262,7 +277,7 @@ test("an allowlist outranks a named list, and the plan says so", async () => {
   );
 });
 
-test("--consul adds a deciding seat after the council, and members can hand it reports", async () => {
+test("--consul adds a deciding seat after the council, and the orchestrator places every report", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-consul-"));
   const result = await runRoleFleet({
     task: "review the auth refactor",
@@ -281,25 +296,45 @@ test("--consul adds a deciding seat after the council, and members can hand it r
     assert.ok(waveOf("consul") > waveOf(member), `${member} must settle before the consul runs`);
   }
 
-  // The reports have to exist as files for the consul to read them: a read-only
-  // member returns its report as a yield payload, and `review-cN.md` would be a
-  // path nobody ever writes.
+  // Only `edit` changes files, and nobody here holds it: a reviewer's findings
+  // are the deliverable, not a patch. `write` is not a middle tier either — it
+  // takes any path in the repo — so the members and the consul carry neither,
+  // and `review-cN.md` / `consul.md` are paths the *orchestrator* fills from the
+  // seat's yielded report before the next wave.
   const members = result.agents.filter((a) => isCouncilMember(a.role));
   assert.ok(members.every((m) => m.model), "members exist");
-  for (const role of result.plan!.roles.filter((r) => isCouncilMember(r.id))) {
-    assert.ok(role.tools.includes("write"), `${role.id} must be able to write its report`);
-    assert.ok(!role.tools.includes("edit"), `${role.id} must not gain source-file edits`);
-    assert.ok(role.acceptance.some((a) => a.includes(role.artifact)), `${role.id} must be told where to write`);
+  for (const role of [...result.plan!.roles.filter((r) => isCouncilMember(r.id)), consul!]) {
+    assert.ok(!role.tools.includes("edit"), `${role.id} must not hold repo-wide edits`);
+    assert.ok(!role.tools.includes("write"), `${role.id} is read-only; its report is placed by the orchestrator`);
   }
-  // The written path is the one the consul is told to read.
+  // Read-only does not mean path-less: the brief still names where the report
+  // belongs and who writes it, since the seat itself cannot.
+  for (const agent of [...members, result.agents.find((a) => a.role === "consul")!]) {
+    const body = await readFile(agent.path, "utf8");
+    assert.ok(body.includes(agent.artifact), `${agent.role} must be told where its report belongs`);
+    assert.match(body, /the orchestrator writes it there/, `${agent.role}'s brief must name the writer`);
+  }
+  // The path the members' reports land at is the one the consul is told to read,
+  // and the run says out loud who puts them there.
   assert.match(consul!.mission, /Read every council report in full/);
   assert.match(consul!.acceptance.join(" "), /Every council report read in full/);
+  assert.ok(
+    result.plan!.notes.some(
+      (n) => n.includes("consul anthropic/claude-opus-4-6: reads 2 council report(s), placed at") && n.includes("by the orchestrator"),
+    ),
+    `the placement must be stated: ${result.plan!.notes.join(" | ")}`,
+  );
 
   // The dispatch hands synthesis to the seat instead of asking the session to
-  // second-guess it.
+  // second-guess it, and it names every read-only artifact the main model has to
+  // write after the wave settles.
   const dispatch = renderDispatch(result.groups, result.agentDir!);
   assert.match(dispatch, /`consul` seat reconciles/);
   assert.ok(!dispatch.includes("treat the most conservative"), "the session must not synthesize as well");
+  for (const member of ["reviewer-c1", "reviewer-c2"]) {
+    const artifact = result.plan!.roles.find((r) => r.id === member)!.artifact;
+    assert.ok(dispatch.includes(artifact), `${member}'s artifact ${artifact} must be in the placement list`);
+  }
 });
 
 test("without --consul the session model keeps the synthesis, unchanged", async () => {
@@ -473,15 +508,17 @@ test("the review model list is made usable before it reaches a seat", async () =
   assert.equal(members[0]!.model, "xai/grok-4");
 
   // A blank consul is no consul. Seating one on a blank selector would mint the
-  // deciding seat on a model the host cannot resolve *and* grant every council
-  // member repo-wide write so their reports reach it.
+  // deciding seat on a model the host cannot resolve.
   const blank = await runRoleFleet({ ...base, council: 3, consul: "  " });
   assert.ok(!blank.plan!.roles.some((r) => r.id === "consul"), "a blank consul was seated");
   assert.ok(blank.plan!.notes.some((n) => n.includes("blank selector was ignored")));
-  assert.ok(
-    !blank.plan!.notes.some((n) => n.includes("repo-wide write")),
-    `no consul means no write grant: ${blank.plan!.notes.join(" | ")}`,
-  );
+  // And appointing one never widens anyone's authority: the members' reports
+  // reach the consul through the orchestrator, not through a `write` grant, so
+  // the seats are as read-only as they would have been with no consul at all.
+  for (const role of blank.plan!.roles.filter((r) => isCouncilMember(r.id))) {
+    assert.ok(!role.tools.includes("write"), `${role.id} must not gain write authority`);
+    assert.ok(!role.tools.includes("edit"), `${role.id} must not gain source-file edits`);
+  }
 });
 
 test("an allowlist keeps a review council on distinct models", () => {
@@ -638,8 +675,85 @@ test("a hand-copied rename of a generated agent survives the next run", async ()
 
   const files = await readdir(dir);
   assert.ok(files.includes("rf-scout-copy.md"), "a renamed copy is the user's file, not stale output");
-  // The second plan is analysis-only, so its implementer file is genuinely stale.
+  // The second plan is a docs cast — scout plus docs-updater — so the
+  // implementer file the first run wrote is genuinely stale.
   assert.ok(!files.includes("rf-implementer.md"), "the stale generated file itself must still go");
+});
+
+test("a hand-written seat file is kept, and the run's own seat takes the next free name", async () => {
+  // Without the generated marker nothing proves this plugin wrote the file, so
+  // overwriting it would lose user content — and the next run would then *delete*
+  // it, since by then it would carry the marker and match its own filename. The
+  // seat still has to run, so it takes the smallest free variant of the name.
+  const dir = await mkdtemp(join(tmpdir(), "rf-handwritten-"));
+  const agentsDir = join(dir, ".omp", "agents");
+  await mkdir(agentsDir, { recursive: true });
+  const mine = "---\nname: rf-scout\ndescription: my own scout\n---\n\nDo it my way.\n";
+  await writeFile(join(agentsDir, "rf-scout.md"), mine, "utf8");
+
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir });
+  assert.equal(result.ok, true);
+  assert.equal(
+    await readFile(join(agentsDir, "rf-scout.md"), "utf8"),
+    mine,
+    "the user's file must survive byte for byte",
+  );
+
+  const scout = result.agents.find((a) => a.role === "scout")!;
+  assert.equal(scout.agent, "rf-scout-2", "the run's seat must take the smallest free name");
+  assert.ok((await readdir(agentsDir)).includes("rf-scout-2.md"), "the renamed seat must exist");
+  // The renamed seat declares the name it dispatches under. Without this the file
+  // would say `name: rf-scout` while sitting at `rf-scout-2.md`, and the identity
+  // check that pairs the two would never match again: the file would be neither
+  // replaceable nor prunable, and every later run would suffix once more.
+  const renamed = await readFile(join(agentsDir, "rf-scout-2.md"), "utf8");
+  assert.match(renamed, /^name: rf-scout-2$/m, "the emitted definition must declare its own name");
+  assert.ok(
+    result.plan!.notes.some((n) =>
+      n.includes("kept hand-written agent file(s), seats run under a new name: rf-scout.md → rf-scout-2.md"),
+    ),
+    `the rename must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("a file stamped by a newer run is left alone, and the run names the foreign owner", async () => {
+  // Every other condition holds — the marker is present and the frontmatter
+  // `name` matches the filename — so the run stamp alone decides. A newer owner
+  // is a run whose waves may still be dispatching, and its files are not this
+  // run's to take.
+  const dir = await mkdtemp(join(tmpdir(), "rf-foreign-"));
+  const agentsDir = join(dir, ".omp", "agents");
+  await mkdir(agentsDir, { recursive: true });
+  const foreign = [
+    "---",
+    "name: rf-scout",
+    "description: Role-fleet scout: maps the work.",
+    "---",
+    "<!-- role-fleet:generated -->",
+    "<!-- role-fleet:run run-9999999999999 -->",
+    "",
+    "In flight.",
+    "",
+  ].join("\n");
+  await writeFile(join(agentsDir, "rf-scout.md"), foreign, "utf8");
+
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir });
+  assert.equal(result.ok, true);
+  assert.equal(
+    await readFile(join(agentsDir, "rf-scout.md"), "utf8"),
+    foreign,
+    "an in-flight run's file must survive",
+  );
+  assert.equal(result.agents.find((a) => a.role === "scout")!.agent, "rf-scout-2");
+  assert.ok(
+    result.plan!.notes.some(
+      (n) =>
+        n.includes("kept agent file(s) belonging to another run") &&
+        n.includes("rf-scout.md owned by run-9999999999999") &&
+        n.includes("concurrent role-fleet runs in one working tree are not supported — use a worktree"),
+    ),
+    `the foreign owner must be named: ${result.plan!.notes.join(" | ")}`,
+  );
 });
 
 test("a seat spelled two ways still spreads a council across distinct models", () => {
@@ -1155,7 +1269,11 @@ test("a catalog seat's description comes from its own purpose, once", async () =
   const emitted = await emitAgents(plan, dir);
   const body = await readFile(emitted.find((a) => a.role === "migration-runner")!.path, "utf8");
   assert.match(body, /^description: "Role-fleet migration-runner: runs a dependency or framework migration/m);
-  assert.match(body, /Can change code\./, "the description still states the grant");
+  assert.match(
+    body,
+    /Can change the code and run commands: the shell reaches any path\./,
+    "the description still states the grant, shell included",
+  );
 });
 
 test("a dependency cycle is dispatched sequentially, not as one parallel batch", async () => {
@@ -1212,13 +1330,12 @@ test("agent markdown quotes the alias so YAML stays valid", () => {
   assert.ok(agentMarkdown(planFor("fix the bug"), role).includes(`model: "${role.model}"`));
 });
 
-test("a consul run's reviewer brief does not claim it cannot write", () => {
-  // A consul turns each member into a writer so its report exists as a file —
-  // and the member's mission was copied from the static reviewer, which ended
-  // "Read-only." So the emitted brief told the seat it could not write in the
-  // one line it reads first, while the same file's frontmatter granted repo-wide
-  // `write`: the brief contradicting its own grant, on the seat whose authority
-  // the consent screen exists to state.
+test("a consul run's reviewer, brief and dispatch all agree the seat is read-only", async () => {
+  // The failure this guards against is bookkeeping drift: a brief that denies
+  // the grant its own frontmatter states, or a consul told to read files nobody
+  // is going to write. The grant is read-only now, and the placement is the
+  // orchestrator's job — stated once in the seat brief and once in the dispatch,
+  // because the brief never reaches the party that has to act on it.
   const plan = synthesizePlan({
     task: "audit the api for injection risks",
     cwd: "/tmp",
@@ -1227,10 +1344,46 @@ test("a consul run's reviewer brief does not claim it cannot write", () => {
     consul: "zai/glm-5",
   });
   const member = plan.roles.find((r) => isCouncilMember(r.id))!;
-  assert.ok(member.tools.includes("write"), "the consul reads reports that must exist as files");
-  const body = agentMarkdown(plan, member);
-  assert.match(body, /tools: \["read", "grep", "glob", "write"\]/, body.slice(0, 400));
-  assert.ok(!body.includes("Read-only"), `the brief denies the grant it was given: ${body.slice(0, 500)}`);
+  const consul = plan.roles.find((r) => r.id === "consul")!;
+  assert.ok(!member.tools.includes("write") && !member.tools.includes("edit"), "members are read-only");
+
+  // The member is told to yield, and told who places the report.
+  const memberBody = agentMarkdown(plan, member);
+  for (const tool of READ_TOOLS) {
+    assert.ok(memberBody.includes(`"${tool}"`), `the member must carry the ${tool} grant: ${memberBody.slice(0, 400)}`);
+  }
+  assert.ok(
+    !memberBody.includes('"write"') && !memberBody.includes('"edit"'),
+    `the member must carry no write grant: ${memberBody.slice(0, 400)}`,
+  );
+  assert.ok(
+    memberBody.includes(`it belongs at \`${member.artifact}\`, and the orchestrator writes it there`),
+    `the brief must route the report through the orchestrator: ${memberBody.slice(-600)}`,
+  );
+  // Read-only is not written down as a hold on the seat: the grant line states
+  // what it is, in the description the user's picker shows.
+  assert.match(memberBody, /Read-only\./, "the description states the grant it actually has");
+
+  // The consul reads the members' artifacts, and each one is flagged as placed by
+  // the orchestrator rather than written by its reviewer.
+  const consulBody = agentMarkdown(plan, consul);
+  for (const m of plan.roles.filter((r) => isCouncilMember(r.id))) {
+    assert.ok(consulBody.includes(m.artifact), `the consul must be routed to ${m.artifact}`);
+  }
+  assert.match(consulBody, /read-only role — it returns the report, the orchestrator writes it here/);
+
+  // And the dispatch names every member's artifact as a file the main model has
+  // to write before the consul's wave starts.
+  const dir = await mkdtemp(join(tmpdir(), "rf-consul-brief-"));
+  const agents = await emitAgents(plan, dir);
+  const dispatch = renderDispatch(dispatchGroups(agents), dir);
+  const readOnly = agents.filter((a) => !a.writesOwnReport);
+  for (const a of agents.filter((x) => isCouncilMember(x.role) || x.role === "consul")) {
+    assert.ok(readOnly.includes(a), `${a.role} is read-only, so the orchestrator places its report`);
+  }
+  for (const a of readOnly) {
+    assert.ok(dispatch.includes(a.artifact), `${a.role}'s artifact must be in the placement list`);
+  }
 });
 
 test("dispatch instructions state the item contract, not just the identity", async () => {
@@ -1277,6 +1430,53 @@ test("dry-run writes nothing", async () => {
   assert.equal(result.agents.length, 0);
   assert.ok(result.waves.length > 0);
   assert.match(renderPlan(result.plan!, result.waves), /@smol|@task/);
+});
+
+test("--dry-run skips the proposal tier instead of paying for it", async () => {
+  // A degenerate cast — nothing but an investigator — is precisely the plan the
+  // tier exists for, so a dry run that still fired it would be spending a model
+  // call on a promise to spend nothing. The control run below proves the counter
+  // is live: the same call is made once when the flag is absent.
+  const dir = await mkdtemp(join(tmpdir(), "rf-dry-propose-"));
+  let calls = 0;
+  const count = async () => {
+    calls += 1;
+    return "[]";
+  };
+  const dry = await runRoleFleet({ task: "отрефактори модуль авторизации", cwd: dir, dryRun: true, propose: count });
+  assert.equal(dry.ok, true);
+  assert.equal(calls, 0, "a dry run must not spend a model call");
+  assert.ok(
+    dry.plan!.notes.some((n) => n.includes("dry run: specialist tier skipped — it is a paid model call")),
+    `the skip must be stated: ${dry.plan!.notes.join(" | ")}`,
+  );
+
+  const wet = await runRoleFleet({ task: "отрефактори модуль авторизации", cwd: dir, propose: count });
+  assert.equal(wet.ok, true);
+  assert.equal(calls, 1, "without the flag the tier does make its call");
+});
+
+test("the run's manifest records the run, and a dry run leaves none", async () => {
+  // The artifact tree holds seat reports but nothing that says which run wrote
+  // them or what the cast was; `plan.json` is that record, written where the
+  // artifacts already are.
+  const dir = await mkdtemp(join(tmpdir(), "rf-manifest-"));
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir });
+  assert.equal(result.ok, true);
+  const runId = result.plan!.runId!;
+  const manifest = JSON.parse(await readFile(join(dir, ".role-fleet", runId, "plan.json"), "utf8"));
+  assert.equal(manifest.runId, runId);
+  assert.equal(manifest.task, "fix the login bug");
+  assert.deepEqual(manifest.notes, result.plan!.notes);
+  assert.deepEqual(manifest.agents, result.agents, "the record must name the seats this run dispatched");
+  assert.equal(typeof manifest.startedAt, "number", "the start time comes from the run id itself");
+
+  // A dry run promises no files, and the record is a file.
+  const dryDir = await mkdtemp(join(tmpdir(), "rf-manifest-dry-"));
+  const dryResult = await runRoleFleet({ task: "fix the login bug", cwd: dryDir, dryRun: true });
+  assert.equal(dryResult.ok, true);
+  const runs = await readdir(join(dryDir, ".role-fleet")).catch(() => []);
+  assert.deepEqual(runs, [], "a dry run must leave no run directory at all");
 });
 
 test("an explicit allowlist file pins the pipeline's models", async () => {
@@ -1494,4 +1694,152 @@ test("the returned verdict describes the cast that actually ships", async () => 
     result.plan!.notes.some((n) => n.includes("confirmed cast") && n.includes("tester")),
     `the dropped seat must be reported: ${result.plan!.notes.join(" | ")}`,
   );
+});
+
+// ── slice fan-out ─────────────────────────────────────────────────────────────
+
+test("--slices is parsed like the other fan-out flags", () => {
+  assert.deepEqual(parseFlags("fix the bug --slices 3".split(" ")).flags.slices, 3);
+  assert.deepEqual(parseFlags("fix the bug --slices=2".split(" ")).flags.slices, 2);
+  const capped = parseFlags("fix the bug --slices 99".split(" "));
+  assert.equal(capped.flags.slices, MAX_SLICES);
+  assert.ok(capped.problems.some((p) => p.includes("capped")), "a clamp is reported, never silent");
+  // A typo stays task text and the flag does not pretend to have been honoured:
+  // reading `--slices abc` as "no fan-out" would drop what was asked for.
+  const typo = parseFlags("fix the bug --slices abc".split(" "));
+  assert.equal(typo.flags.slices, undefined);
+  assert.match(typo.task, /abc$/);
+  assert.ok(typo.problems.some((p) => p.includes("positive whole number")));
+});
+
+test("the dispatch tells the orchestrator to name each slice seat's files", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-slice-dispatch-"));
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir, slices: 3 });
+  const text = renderDispatch(result.groups, result.agentDir ?? "");
+  // The plugin cannot know the partition — it arrives with the scout's map — so
+  // the assignment has to be stated, or two seats edit the same file. Each seat
+  // is named by the roster id the batch addresses it by.
+  assert.match(text, /fans the implementation out across 3 writer seats/);
+  const items = [...text.matchAll(/```json\n([\s\S]*?)```/g)].flatMap(
+    (m) => JSON.parse(m[1]) as Array<{ name: string; agent: string }>,
+  );
+  const slices = items.filter((i) => i.agent.startsWith("rf-implementer-"));
+  assert.equal(slices.length, 3, `the batch must fan out: ${items.map((i) => i.agent).join(", ")}`);
+  const block = text.slice(text.indexOf("fans the implementation out"), text.indexOf("Read each agent's FULL"));
+  for (const item of slices) {
+    assert.ok(block.includes(`- \`${item.name}\``), `${item.agent} must be named for its own assignment`);
+  }
+  const plain = await runRoleFleet({ task: "fix the login bug", cwd: await mkdtemp(join(tmpdir(), "rf-slice-none-")) });
+  assert.ok(
+    !renderDispatch(plain.groups, plain.agentDir ?? "").includes("fans the implementation out"),
+    "a single implementer needs no partition",
+  );
+});
+
+test("a fan-out is emitted as ordinary agents in one wave, and recorded", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-slice-emit-"));
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir, slices: 2 });
+  const files = await readdir(join(dir, ".omp/agents"));
+  assert.ok(files.includes("rf-implementer-1.md") && files.includes("rf-implementer-2.md"), files.join(", "));
+  const seats = result.agents.filter((a) => a.role.startsWith("implementer-"));
+  assert.equal(new Set(seats.map((a) => a.wave)).size, 1, "the fan-out is one parallel wave");
+  assert.ok(seats.every((a) => a.writesOwnReport), "each slice seat places its own report");
+  const manifest = JSON.parse(
+    await readFile(join(dir, ".role-fleet", result.plan!.runId ?? "", "plan.json"), "utf8"),
+  ) as { agents: Array<{ role: string }> };
+  assert.equal(manifest.agents.filter((a) => a.role.startsWith("implementer-")).length, 2, "the run record carries the fan-out");
+});
+
+test("a council whose aliases resolve to one model reports the collapse", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-collapse-"));
+  const result = await runRoleFleet({
+    task: "review the auth module with a council of different providers",
+    cwd: dir,
+    dryRun: true,
+    council: 3,
+    resolveModel: () => "anthropic/claude-sonnet-4-6",
+  });
+  assert.equal(result.ok, true);
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
+  assert.equal(members.length, 3);
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("council independence") && n.includes("3 paid reviews")),
+    `the collapse must be stated: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("thinking-level variants of one named model are one review model", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-suffix-"));
+  const result = await runRoleFleet({
+    task: "review the auth module",
+    cwd: dir,
+    dryRun: true,
+    models: ["xai/grok-4", "xai/grok-4:high"],
+    resolveModel: (selector) => selector.replace(/:high$/, ""),
+  });
+  assert.equal(result.ok, true);
+  const reviewers = result.plan!.roles.filter((r) => r.core === "reviewer");
+  assert.equal(reviewers.length, 1, `two council members on one model: ${result.plan!.roles.map((r) => r.id).join(",")}`);
+  assert.equal(reviewers[0]!.model, "xai/grok-4");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("thinking-level suffix")),
+    `the dropped variant must be named: ${result.plan!.notes.join(" | ")}`,
+  );
+});
+
+test("emitAgents refuses a role id that is not a safe agent name", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-badname-"));
+  const plan = planFor("fix the auth bug");
+  plan.roles[0]!.id = "Bad Id";
+  await assert.rejects(emitAgents(plan, dir), /refusing to write agent definition/);
+  assert.deepEqual(await readdir(dir), [], "a bad id must leave nothing on disk");
+});
+
+test("a renamed seat never takes another seat's base filename", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-reserve-"));
+  // A hand-written file owns the base name, so `scout` must take a suffix. The
+  // cast also holds a seat whose literal id is `scout-2`; without reserving every
+  // base name, the rename would resolve to that seat's file and one brief would
+  // overwrite the other.
+  await writeFile(join(dir, "rf-scout.md"), "---\nname: rf-scout\n---\nhand-written\n", "utf8");
+  const plan = planFor("fix the auth bug");
+  plan.roles = [
+    { ...plan.roles[0]!, id: "scout", artifact: join(dir, "scout.md") },
+    { ...plan.roles[0]!, id: "scout-2", artifact: join(dir, "scout-2.md") },
+  ];
+  const emitted = await emitAgents(plan, dir);
+  const paths = emitted.map((a) => a.path);
+  assert.equal(new Set(paths).size, paths.length, `two seats share one file: ${paths.join(", ")}`);
+  assert.equal(emitted.find((a) => a.role === "scout-2")!.agent, "rf-scout-2");
+  assert.equal(emitted.find((a) => a.role === "scout")!.agent, "rf-scout-3");
+});
+
+test("pruneRunDirs never deletes the current run, even at keep 0", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rf-keep0-"));
+  for (const id of ["run-1000", "run-2000", "run-3000"]) await mkdir(join(root, id));
+  await pruneRunDirs(root, "run-3000", 0);
+  const left = (await readdir(root)).sort();
+  assert.deepEqual(left, ["run-3000"]);
+});
+
+test("a stale foreign agent file is replaced quietly; a recent one warns", async () => {
+  // Sequential runs reuse seat names, so the older file is always foreign. The
+  // note is for a plausible in-flight clobber, not for yesterday's run.
+  for (const [owner, expectNote] of [
+    ["run-9999000", true],
+    ["run-9000000", false],
+  ] as const) {
+    const dir = await mkdtemp(join(tmpdir(), `rf-recency-${owner}-`));
+    const runId = "run-10000000";
+    const plan = synthesizePlan({ task: "fix the auth bug", cwd: dir, workDir: join(dir, ".role-fleet", runId), maxRoles: 4 });
+    plan.runId = runId;
+    await writeFile(
+      join(dir, "rf-scout.md"),
+      `---\nname: rf-scout\ndescription: "stale"\n---\n<!-- role-fleet:generated -->\n<!-- role-fleet:run ${owner} -->\n`,
+      "utf8",
+    );
+    await emitAgents(plan, dir);
+    const noted = plan.notes.some((n) => n.includes("replaced agent file(s)"));
+    assert.equal(noted, expectNote, `${owner}: notes were ${plan.notes.join(" | ")}`);
+  }
 });

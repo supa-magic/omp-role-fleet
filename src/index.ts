@@ -14,15 +14,18 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { expandHome, runRoleFleet, type RunOptions, type RunResult } from "./pipeline.ts";
-import { renderDispatch, renderPlan, renderVerdict } from "./render.ts";
+import { runRoleFleet, type RunOptions, type RunResult } from "./pipeline.ts";
+import { MAX_COUNCIL, MAX_MODELS, MAX_ROLES, parseFlags, type Flags } from "./flags.ts";
+import { dispatchPlan, renderDispatch, renderPlan, renderVerdict } from "./render.ts";
+import { persistSettledRuns } from "./ledger.ts";
+import { renderRunList, renderRunReport, renderRunStatus } from "./report.ts";
 import { castPresets, seatRows } from "./confirm.ts";
-import { DEFAULT_MAX_ROLES, planWaves, type RolePlan } from "./core.ts";
+import { DEFAULT_MAX_ROLES, grantsWrite, isCouncilMember, MAX_SLICES, planWaves, type RolePlan } from "./core.ts";
 import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpectedModels } from "./model-observed.ts";
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.3.6";
+const PLUGIN_VERSION = "1.5.0";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -35,293 +38,7 @@ interface PlanToolParams {
   models?: string[];
   consul?: string;
   reviewOnly?: boolean;
-}
-
-/** Bounds shared with the `role_fleet_plan` zod schema, so the flag path and
- *  the tool path cannot disagree about what is reachable. */
-const MAX_ROLES = 8;
-const MAX_COUNCIL = 3;
-/** Council members the user names themselves. Above the alias fan-out, because a
- *  named list is a deliberate ask — but still bounded, since every member is a
- *  concurrent paid run. */
-const MAX_MODELS = 5;
-
-/** Explicit model list for the review seats, in the order given. */
-interface Flags {
-  dryRun?: boolean;
-  allowlist?: string;
-  maxRoles?: number;
-  council?: number;
-  models?: string[];
-  consul?: string;
-  reviewOnly?: boolean;
-}
-
-/**
- * `--models (a, b, @slow)` → `["a", "b", "@slow"]`.
- *
- * Parentheses are the whole safety mechanism. Without them, telling a bare list
- * from the first word of the task is a guess, and the guess that costs the most
- * is `--models fix the login bug` → a reviewer on a model called `fix` with the
- * task's first word gone. The brackets say where the list ends, so nothing is
- * guessed — and a bare model id (`glm-5`) works too, because it no longer has to
- * identify itself.
- *
- * Duplicates collapse with a word: two council members on one model is the
- * double-priced single review this feature exists to avoid, and silently
- * spawning it would look like the user asked for two opinions. Quotes and
- * brackets are stripped because the host splits the command line on whitespace
- * only, so both reach here attached.
- */
-function parseModelList(raw: string, problems: string[]): string[] | undefined {
-  const unbracketed = raw.replace(/^["']|["']$/g, "").trim();
-  const bracketed = unbracketed.startsWith("(") && unbracketed.endsWith(")");
-  // A stray bracket means the list was cut short. Splitting it anyway pins
-  // selectors like `(a` that the host cannot resolve, so the seat silently rides
-  // the parent's model — the exact confusion these brackets exist to prevent.
-  if (!bracketed && /[()]/.test(unbracketed)) {
-    problems.push(`--models got an unbalanced bracket list from "${raw}" — write a balanced (a,b,c), ignoring it`);
-    return undefined;
-  }
-  const tokens = (bracketed ? unbracketed.slice(1, -1) : unbracketed)
-    .split(",")
-    .map((t) => t.replace(/^["']|["']$/g, "").trim())
-    .filter(Boolean);
-  // A bracket surviving inside an entry means the list was cut short: `(a,b))`
-  // unwraps to `a, b)`, and a selector of `b)` resolves to nothing on the host,
-  // which leaves the seat on the parent's model while the plan claims it named
-  // one. Refusing the whole list beats pinning a selector that cannot exist.
-  const mangled = tokens.filter((t) => /[()]/.test(t));
-  if (mangled.length) {
-    problems.push(`--models got malformed entries (${mangled.join(", ")}) — write a balanced (a,b,c), ignoring it`);
-    return undefined;
-  }
-  if (!tokens.length) {
-    problems.push(`--models got nothing usable from "${raw}", ignoring it`);
-    return undefined;
-  }
-  const unique = [...new Set(tokens)];
-  if (unique.length !== tokens.length) {
-    problems.push(`--models listed ${tokens.length} entries but only ${unique.length} are distinct — duplicates dropped`);
-  }
-  if (unique.length > MAX_MODELS) {
-    problems.push(`--models capped at ${MAX_MODELS} (asked for ${unique.length})`);
-    return unique.slice(0, MAX_MODELS);
-  }
-  return unique;
-}
-
-export function parseFlags(words: string[]): { flags: Flags; task: string; problems: string[] } {
-  const flags: Flags = { dryRun: false };
-  const problems: string[] = [];
-  const rest: string[] = [];
-  // A typo'd number must not travel: `Number("abc")` is NaN, `NaN ?? 4` is NaN,
-  // and a NaN council silently switches the feature off while a NaN role cap
-  // empties the plan into an opaque "plan has no roles" rejection.
-  const numeric = (raw: string | undefined, flag: string, max: number): number | undefined => {
-    const value = Number(raw);
-    if (raw === undefined || !Number.isInteger(value) || value < 1) {
-      problems.push(`${flag} needs a positive whole number (got "${raw ?? ""}"), ignoring it`);
-      return undefined;
-    }
-    // The tool schema caps these at the same bounds; a flag typed by hand must
-    // not be the only way to ask for a fan-out the model cannot.
-    if (value > max) {
-      problems.push(`${flag} capped at ${max} (asked for ${value})`);
-      return max;
-    }
-    return value;
-  };
-  // A space-separated value must not eat the next flag: `--max-roles --dry-run`
-  // used to consume `--dry-run` as the number and then write files anyway.
-  const takeValue = (index: number): string | undefined => {
-    const next = words[index + 1];
-    return next !== undefined && !next.startsWith("-") ? next : undefined;
-  };
-  // A numeric flag takes the next word only when that word really is a number.
-  // Otherwise `--max-roles fix the bug` consumed "fix" as the cap, the cap was
-  // rejected as non-numeric, and "fix" was gone from the task text too — the
-  // user got a warning about a flag they typed correctly and a task that had
-  // quietly lost its first word. A non-numeric follower stays task text.
-  const takeNumber = (index: number): string | undefined => {
-    const next = takeValue(index);
-    return next !== undefined && /^\d+$/.test(next) ? next : undefined;
-  };
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    if (word === "--dry-run" || word === "-n") flags.dryRun = true;
-    // A prompt is not a shell: `~` reaches the parser literally and `readFile`
-    // cannot resolve it, so `--allowlist ~/fleet.json` failed with an ENOENT
-    // naming a path that does not exist. Expanded here so the flag reflects what
-    // will be opened, and again in `runRoleFleet` for the tool and env surfaces.
-    // `export ROLE_FLEET_ALLOWLIST=...` is expanded by the shell and needs none.
-    else if (word === "--allowlist") {
-      const value = takeValue(i);
-      if (value === undefined) {
-        // Falling through to ROLE_FLEET_ALLOWLIST would silently pin a file
-        // the user never named.
-        problems.push('--allowlist needs a file path, ignoring it');
-      } else {
-        flags.allowlist = expandHome(value);
-        i++;
-      }
-    } else if (word.startsWith("--allowlist=")) {
-      // An empty path is a missing path: it would fall through to
-      // ROLE_FLEET_ALLOWLIST or to unpinned alias mode without a word.
-      const value = word.slice("--allowlist=".length);
-      if (value === "") problems.push("--allowlist needs a file path, ignoring it");
-      else flags.allowlist = expandHome(value);
-    }
-    else if (word === "--max-roles") {
-      const value = takeNumber(i);
-      const follower = takeValue(i);
-      if (value !== undefined) {
-        i++;
-        flags.maxRoles = numeric(value, "--max-roles", MAX_ROLES);
-      } else if (follower !== undefined) {
-        // Name the word the user actually typed: "(got \"\")" sent them
-        // looking for a missing argument they had in fact supplied. The word
-        // stays task text rather than being swallowed as a bogus cap.
-        problems.push(`--max-roles needs a positive whole number, got "${follower}" — keeping the default, treating it as task text`);
-      } else {
-        // Trailing flag, nothing after it. `numeric` would report `(got "")` —
-        // naming an empty string the user never typed — and the missing value
-        // is the whole story, so it is said once, in the words that fit.
-        problems.push("--max-roles needs a positive whole number, ignoring it");
-      }
-    } else if (word.startsWith("--max-roles=")) flags.maxRoles = numeric(word.slice("--max-roles=".length), "--max-roles", MAX_ROLES);
-    else if (word === "--review-only") flags.reviewOnly = true;
-    else if (word === "--council") {
-      // `--council` is bare (size 3), but `--council 5` must consume the number:
-      // left unconsumed it landed in the task text of every emitted agent.
-      const value = takeNumber(i);
-      const follower = takeValue(i);
-      if (value !== undefined) {
-        i++;
-        flags.council = numeric(value, "--council", MAX_COUNCIL);
-      } else {
-        if (follower !== undefined) {
-          // `--council abc` used to mean a full council of 3, silently. Reading
-          // a typo as a larger-than-asked fan-out is the expensive direction,
-          // so it is reported rather than guessed.
-          problems.push(`--council needs a positive whole number, got "${follower}" — running the default council, treating it as task text`);
-        }
-        flags.council = MAX_COUNCIL;
-      }
-    } else if (word.startsWith("--council=")) flags.council = numeric(word.slice("--council=".length), "--council", MAX_COUNCIL);
-    else if (word === "--models" || word.startsWith("--models=")) {
-      const inline = word.startsWith("--models=") ? word.slice("--models=".length) : undefined;
-      if (inline !== undefined) {
-        // One word usually carries the value, so there is nothing to consume and
-        // nothing to guess — parentheses optional here, purely for muscle memory
-        // with the spaced form. But the host splits on whitespace, so
-        // `--models=(a, b)` arrives as `--models=(a,` and `b)`: a value that
-        // opens a bracket it does not close finishes in the words after it.
-        // Read the rest only while the bracket is open — a value with an extra
-        // `)` is malformed whatever follows, and `parseModelList` is the one that
-        // reports it by name.
-        let text = inline;
-        let depth = 0;
-        for (const ch of inline) {
-          if (ch === "(") depth++;
-          else if (ch === ")") depth--;
-        }
-        let next = i;
-        while (depth > 0 && next + 1 < words.length) {
-          const candidate = words[next + 1]!;
-          for (const ch of candidate) {
-            if (ch === "(") depth++;
-            else if (ch === ")") depth--;
-          }
-          text += ` ${candidate}`;
-          next++;
-        }
-        // A bracket still open after every remaining word was read is a list cut
-        // short, not one the host split: the value is the single word, and
-        // refusing it beats pinning `(a` as a selector that cannot exist.
-        if (depth === 0 && next > i) i = next;
-        flags.models = parseModelList(depth === 0 ? text : inline, problems);
-      } else {
-        // The list is read across words until the brackets balance, because
-        // the host splits the command line on whitespace: `--models (a, b, c)`
-        // arrives as three words, and stopping at the first would leave `b,`
-        // and `c)` to be parsed as task text.
-        const collected: string[] = [];
-        let depth = 0;
-        let opened = false;
-        let next = i;
-        while (next + 1 < words.length) {
-          const candidate = words[next + 1]!;
-          for (const ch of candidate) {
-            if (ch === "(") {
-              depth++;
-              opened = true;
-            } else if (ch === ")") depth--;
-          }
-          collected.push(candidate);
-          next++;
-          if (depth === 0) break;
-        }
-        if (!opened || depth !== 0) {
-          // Nothing is consumed on a malformed or non-bracketed follower: those
-          // words are the user's task, not a value this flag may take.
-          //
-          // With no bracket at all the scan walked the entire rest of the line,
-          // so quoting `collected` would echo the whole task back at the user as
-          // if it were a malformed list. Name the one word that was not a list;
-          // the unbalanced case genuinely saw a partial list and shows it.
-          problems.push(
-            !opened
-              ? `--models needs a bracketed list like (a,b,c), got "${collected[0] ?? ""}" — treating it as task text`
-              : `--models needs a balanced bracketed list like (a,b,c), got "${collected.join(" ")}" — treating it as task text`,
-          );
-        } else {
-          i = next;
-          flags.models = parseModelList(collected.join(" "), problems);
-        }
-      }
-    } else if (word === "--consul" || word.startsWith("--consul=")) {
-      const inline = word.startsWith("--consul=") ? word.slice("--consul=".length) : undefined;
-      // One model, so no brackets — but a follower still has to look like one.
-      // `--consul fix the login bug` must not put "fix" on the deciding seat:
-      // an unresolvable model there is the silent-parent-model failure the rest
-      // of this parser keeps refusing to produce.
-      const follower = inline === undefined ? takeValue(i) : undefined;
-      // Trimmed: the host splits on whitespace, so a quoted `--consul=" "` arrives
-      // with its padding intact, and a blank selector is the one value that must
-      // never be pinned — `Boolean(" ")` is true, so the plan would mint a consul
-      // seat on a selector the host cannot resolve and never say so.
-      const candidate = (inline ?? follower)?.replace(/^["']|["']$/g, "").trim();
-      // A model is `@alias` or `provider/id`, structurally. The earlier test was
-      // "contains @, /, or a digit", which accepted `/fix` (a task word with a
-      // slash) and `v2` (a task word with a digit) and pinned them as selectors
-      // the host cannot resolve — the seat then ran on the parent's model while
-      // the plan claimed a provider it never had. A bare name like `sonnet` is
-      // indistinguishable from task text here, so it goes in the `=` form, where
-      // the user separated the value themselves. Paths nest — a router selector
-      // is `openrouter/anthropic/claude-4`, three segments — so the shape is one
-      // or more `/segment`s after the provider, not exactly one: the spaced form
-      // used to refuse the spelling the `=` form accepted, which made the same
-      // selector work or fail depending on how it was typed.
-      const isModelShape = candidate !== undefined && /^(@[\w][\w.-]*|[\w][\w.-]*(?:\/[\w][\w.:-]*)+)$/.test(candidate);
-      if (candidate && (isModelShape || inline !== undefined)) {
-        if (inline === undefined) i++;
-        flags.consul = candidate;
-      } else {
-        problems.push(
-          `--consul needs @alias or provider/id (a bare name goes as --consul=NAME), got "${candidate ?? ""}" — the deciding seat stays on your session model`,
-        );
-      }
-    } else if (word.startsWith("-")) {
-      // An unrecognized flag is not task text: it would otherwise reach the
-      // synthesis heuristics and, verbatim, the brief of every emitted agent.
-      // Reported, never silently dropped — the word stays in the task so nothing
-      // the user typed disappears.
-      problems.push(`unknown flag "${word}" — treated as part of the task text`);
-      rest.push(word);
-    } else rest.push(word);
-  }
-  return { flags, task: rest.join(" ").trim(), problems };
+  slices?: number;
 }
 
 /**
@@ -333,7 +50,12 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
  * the confirmer, say), and neither copy was readable while mis-indented inside
  * the surrounding try block.
  */
-function runOptions(input: Flags & { task: string; cwd: string }, ctx: ExtensionContext, progress: Progress): RunOptions {
+function runOptions(
+  input: Flags & { task: string; cwd: string },
+  ctx: ExtensionContext,
+  progress: Progress,
+  onDispatch?: RunOptions["onDispatch"],
+): RunOptions {
   return {
     task: input.task,
     cwd: input.cwd,
@@ -347,13 +69,16 @@ function runOptions(input: Flags & { task: string; cwd: string }, ctx: Extension
     // to wonder which of the two took effect.
     ...(input.models?.length ? { models: input.models } : {}),
     ...(input.consul ? { consul: input.consul } : {}),
+    ...(input.slices && input.slices > 1 ? { slices: input.slices } : {}),
     // One cheap side turn, no history, no executed tools: the dynamic
     // specialist tier. Absent on hosts without side turns — static only.
     propose: makeProposer(ctx),
     resolveModel: makeModelResolver(ctx),
     // One confirmation per run, before any agent file is written. Hosts
     // without an interactive dialog dispatch straight through.
+    pluginVersion: PLUGIN_VERSION,
     confirm: makeConfirmer(ctx.ui, progress),
+    ...(onDispatch ? { onDispatch } : {}),
   };
 }
 
@@ -388,10 +113,12 @@ interface ArgumentCompletion {
 }
 
 const FLAG_COMPLETIONS: ArgumentCompletion[] = [
-  { value: "--dry-run", label: "--dry-run · plan only, write nothing" },
+  { value: "--dry-run", label: "--dry-run · plan only, write nothing, no paid tier" },
+  { value: "-n", label: "-n · short form of --dry-run" },
   { value: `--max-roles ${DEFAULT_MAX_ROLES}`, label: `--max-roles N · cap generated roles (default ${DEFAULT_MAX_ROLES})` },
   { value: "--allowlist ", label: "--allowlist FILE · pin models to a file instead of @aliases" },
-  { value: "--review-only", label: "--review-only · scout and reviewers only, no seat can edit code" },
+  { value: "--review-only", label: "--review-only · scout and reviewers only, no seat can change the code" },
+  { value: "--slices 2", label: "--slices N · fan the implementation out across N writer seats" },
   { value: "--council", label: "--council [N] · N reviewers on different providers" },
   { value: "--models (", label: "--models (a,b,c) · review seats on these models, in order" },
   { value: "--consul ", label: "--consul MODEL · model that reconciles the council reports (default: session model)" },
@@ -465,18 +192,26 @@ function makeConfirmer(
     // reads as a stuck process rather than as progress.
     progress?.pause();
     const presets = castPresets(plan);
-    // Named in the question, not only in the options' previews: the fine-grained
-    // picker's row detail is where the per-seat authority lives, and the first
-    // screen is where a consul run's repo-wide `write` has to be visible without
-    // the reader opening anything. Silently bigger authority than the prose claims
-    // is precisely what this dialog exists to prevent.
-    const editors = plan.roles.filter((r) => r.tools.includes("edit")).length;
-    const repoWriters = plan.roles.filter(
-      (r) => r.tools.includes("write") && !r.tools.includes("edit"),
-    ).length;
+    const writers = plan.roles.filter((r) => grantsWrite(r.tools)).length;
+    const shells = plan.roles.filter((r) => r.tools.includes("bash")).length;
+    // The shell count is not folded into the writer count: a shell is wider than
+    // an editor's grant — any command, any path — and the question a user is
+    // answering here is what the run may do, so the reach is named.
     const authority =
-      `${editors} seat(s) can edit code` +
-      (repoWriters ? `, ${repoWriters} hold repo-wide write and could overwrite any path` : "");
+      writers === 0
+        ? "no seat can change the code"
+        : `${writers} of ${plan.roles.length} seat(s) can change the code` +
+          (shells ? `, ${shells} of them with a shell: any command, any path` : "");
+    // The consent screen is where the spend is approved, so the council's
+    // independence has to be legible here — plan notes are printed after the
+    // dialog and cannot inform the answer. Aliases that resolve to one model
+    // buy one review several times.
+    const reviewers = plan.roles.filter((r) => isCouncilMember(r.id));
+    const reviewerModels = new Set(reviewers.map((r) => r.modelResolved ?? r.model));
+    const collapse =
+      reviewers.length > 1 && reviewerModels.size < reviewers.length
+        ? ` (${reviewerModels.size} distinct model${reviewerModels.size === 1 ? "" : "s"} across ${reviewers.length} reviewers)`
+        : "";
     const answer = await askDialog(
       [
         {
@@ -487,7 +222,7 @@ function makeConfirmer(
           question: `Run ${plan.roles.length} seat(s) on ${plan.roles
             .map((r) => r.modelResolved ?? r.model)
             .filter((m, i, all) => all.indexOf(m) === i)
-            .join(", ")}? ${authority}.`,
+            .join(", ")}?${collapse} ${authority}.`,
           options: presets.map((p) => ({ label: p.label, description: p.description, preview: p.preview })),
           // Index 0 is the proposal, so the cursor and the (Recommended) label
           // both land on it: accepting costs one Enter.
@@ -653,8 +388,11 @@ export default function roleFleet(pi: ExtensionAPI): void {
   // settled `task` result carries it. Plan-time resolution records intent, and
   // a retry fallback replaces exactly that — without this the alias and the
   // plan keep claiming the intended model after the provider switched.
-  pi.on("tool_result", (event, ctx) => {
+  pi.on("tool_result", async (event, ctx) => {
     if (event.toolName !== "task" || ctx.agent?.kind === "sub") return;
+    // Best-effort ledger: place read-only reports and record outcomes before
+    // the transient notification, so a missed line is still auditable later.
+    await persistSettledRuns(event.details).catch(() => ({ outcomes: [], written: [] }));
     for (const observation of observeSettledRuns(event.details)) {
       ctx.ui.notify(renderObservation(observation), observation.fallback ? "warning" : "info");
     }
@@ -676,11 +414,38 @@ export default function roleFleet(pi: ExtensionAPI): void {
           return;
         }
 
+        if (words[0] === "runs" && words.length === 1) {
+          ctx.ui.notify(await renderRunList(ctx.cwd), "info");
+          return;
+        }
+        if (words[0] === "status" && words.length === 1) {
+          ctx.ui.notify(await renderRunStatus(ctx.cwd), "info");
+          return;
+        }
+        if (words[0] === "doctor" && words.length === 1) {
+          ctx.ui.notify(
+            [
+              `role-fleet ${PLUGIN_VERSION}`,
+              `specialist tier: ${typeof ctx.runEphemeralTurn === "function" ? "available" : "unavailable (static cast only)"}`,
+              `model resolution: ${typeof ctx.models?.resolve === "function" ? "available" : "unavailable (aliases shown unresolved)"}`,
+              `confirmation dialog: ${typeof ctx.ui?.askDialog === "function" ? "available" : "unavailable (dispatches without asking)"}`,
+              `live status line: ${typeof ctx.ui?.setStatus === "function" ? "available" : "unavailable"}`,
+              `async task snapshot: ${typeof ctx.getAsyncJobSnapshot === "function" ? "available" : "unavailable"}`,
+            ].join("\n"),
+            "info",
+          );
+          return;
+        }
+        if (words[0] === "report" && (words.length === 1 || (words.length === 2 && /^run-\d+$/.test(words[1]!)))) {
+          ctx.ui.notify(await renderRunReport(ctx.cwd, words[1]), "info");
+          return;
+        }
+
         const { flags, task, problems } = parseFlags(words);
         for (const p of problems) ctx.ui.notify(p, "warning");
         if (!task) {
           ctx.ui.notify(
-            "usage: /role-fleet <task> [--dry-run] [--max-roles N] [--allowlist FILE] [--review-only] [--council [N]] [--models (a,b,c)] [--consul MODEL]",
+            "usage: /role-fleet <task> [--dry-run|-n] [--max-roles N] [--allowlist FILE] [--review-only] [--council [N]] [--models (a,b,c)] [--consul MODEL] [--slices N] · /role-fleet report [run-id] · /role-fleet status · /role-fleet runs · /role-fleet doctor",
             "warning",
           );
           return;
@@ -689,7 +454,24 @@ export default function roleFleet(pi: ExtensionAPI): void {
         const progress = startProgress(ctx, ctx.ui, "role-fleet: choosing the cast…");
         let result: RunResult;
         try {
-          result = await runRoleFleet(runOptions({ ...flags, task, cwd: ctx.cwd }, ctx, progress));
+          result = await runRoleFleet(
+            runOptions({ ...flags, task, cwd: ctx.cwd }, ctx, progress, async (approved) => {
+              // The settled-result observer compares what ran against this.
+              // Recorded before the batch is dispatched, so a fast wave cannot
+              // settle before the plan it is measured against exists. A
+              // subagent session runs its own fleet and must not overwrite the
+              // parent's baseline.
+              recordExpectedModels(approved.agents, { subSession: ctx.agent?.kind === "sub" });
+
+              // An idle session does not start a turn for a plain sendMessage:
+              // the batch would sit in history and never be executed. While a
+              // turn is running, the batch steers the current one instead of
+              // queueing behind it.
+              pi.sendMessage(dispatchPrompt(task, approved), {
+                ...(ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" as const }),
+              });
+            }),
+          );
         } finally {
           // Cleared on every path, including a throw: an indicator that
           // outlives its run is a lie sitting in the status bar.
@@ -697,6 +479,15 @@ export default function roleFleet(pi: ExtensionAPI): void {
         }
 
         if (!result.ok || !result.plan) {
+          // A dispatch failure is not a rejected plan: the files exist and the
+          // user needs to know the fleet was emitted but never started.
+          if (result.dispatchError) {
+            ctx.ui.notify(
+              `role-fleet: emitted ${result.agents.length} agent definition(s) but dispatch failed — ${cleanError(result.dispatchError)}`,
+              "error",
+            );
+            return;
+          }
           // A declined cast is a decision, not a fault. The verdict text is the
           // same, but reporting it as an error tells the user something broke
           // when they answered "no".
@@ -708,20 +499,6 @@ export default function roleFleet(pi: ExtensionAPI): void {
           `${renderPlan(result.plan, result.waves)}\n\n${renderVerdict(result.verdict)}`,
           "info",
         );
-        if (flags.dryRun) return;
-
-        // The settled-result observer compares what ran against this. Recorded
-        // before the batch is dispatched, so a fast wave cannot settle before
-        // the plan it is measured against exists. A subagent session runs its own
-        // fleet and must not overwrite the parent's baseline.
-        recordExpectedModels(result.agents, { subSession: ctx.agent?.kind === "sub" });
-
-        // An idle session does not start a turn for a plain sendMessage: the
-        // batch would sit in history and never be executed. While a turn is
-        // running, the batch steers the current one instead of queueing behind it.
-        pi.sendMessage(dispatchPrompt(task, result), {
-          ...(ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" as const }),
-        });
       } catch (err) {
         pi.logger.error(`role-fleet: unhandled command failure: ${String(err)}`);
         ctx.ui.notify(`role-fleet ${PLUGIN_VERSION}: ${cleanError(err)}`, "error");
@@ -746,7 +523,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
       maxRoles: z
         .number()
         .int()
-        .min(1)
+        .min(2)
         .max(MAX_ROLES)
         .optional()
         .describe(`Cap on generated roles (default ${DEFAULT_MAX_ROLES})`),
@@ -769,6 +546,13 @@ export default function roleFleet(pi: ExtensionAPI): void {
         .optional()
         .describe("Model that reconciles the council's reports; omit to let the session model do it"),
       reviewOnly: z.boolean().optional().describe("Scout and review seats only: no implementer, tester, or writer"),
+      slices: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_SLICES)
+        .optional()
+        .describe("Fan the implementation out across this many writer seats (implementer-1 … -N)"),
     }),
     async execute(_toolCallId, params: PlanToolParams, _signal, _onUpdate, ctx) {
       try {
@@ -789,6 +573,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
                 models: params.models,
                 consul: params.consul,
                 reviewOnly: params.reviewOnly,
+                slices: params.slices,
               },
               ctx,
               progress,
@@ -828,13 +613,22 @@ export default function roleFleet(pi: ExtensionAPI): void {
         if (!params.dryRun) recordExpectedModels(result.agents, { subSession: ctx.agent?.kind === "sub" });
         return {
           content: [{ type: "text" as const, text }],
+          // The model gets the same batches the markdown renders, as data:
+          // wave boundaries, roster names (including `-2` renames), artifacts,
+          // dependencies and the read-only placement contract. Parsing prose
+          // for these is how a dispatch loses a seat or runs a wave twice.
           details: {
+            runId: result.plan.runId,
+            verdict: result.verdict,
+            notes: result.plan.notes,
             roles: result.plan.roles.map((r) => ({
-            id: r.id,
-            model: r.model,
-            ...(r.modelResolved ? { modelResolved: r.modelResolved } : {}),
-          })),
+              id: r.id,
+              model: r.model,
+              ...(r.modelResolved ? { modelResolved: r.modelResolved } : {}),
+            })),
+            groups: dispatchPlan(result.groups),
             agentDir: result.agentDir,
+            dryRun: params.dryRun ?? false,
           },
         };
       } catch (err) {
