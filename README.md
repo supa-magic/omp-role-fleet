@@ -44,6 +44,19 @@ omp plugin link ./omp-role-fleet
 host loads it as-is — no build step, no runtime dependencies. Node 22.6+ is
 only needed to run the test suite from a checkout.
 
+### Publishing a release
+
+Same pattern as `supa-magic/spm`: CI publishes to npm — no local `npm login`.
+
+1. Bump `package.json`, `package-lock.json`, and `PLUGIN_VERSION` in
+   `src/index.ts` together (a test pins them equal).
+2. Push to `main`, then create a GitHub Release tagged `vX.Y.Z` matching that
+   version (or use **Actions → Publish to npm → Run workflow** to re-run
+   publish for the version already on `main`).
+3. The **Publish to npm** workflow (environment `npm`, secret `NPM_TOKEN`)
+   runs `npm test`, `npm run typecheck`, and `npm publish --access public`.
+
+
 ---
 
 ## Your first run
@@ -830,8 +843,10 @@ npm run typecheck
 
 Before publishing, `npm pack --dry-run` should list exactly `package.json`,
 `README.md`, `CHANGELOG.md`, `LICENSE` and `src/**` — nothing else. Release
-notes live in `CHANGELOG.md`, and `prepublishOnly` runs the suite and the
-typecheck before a tarball can be cut.
+notes live in `CHANGELOG.md`. Cutting a release is a GitHub Release tag
+`vX.Y.Z` (see **Install → Publishing a release**); `prepublishOnly` still runs
+the suite and typecheck if you ever publish from a checkout.
+
 
 ## License
 

@@ -1,0 +1,59 @@
+name: Publish to npm
+
+# Same shape as supa-magic/spm: a GitHub Release triggers publish.
+# Version lives in package.json (+ PLUGIN_VERSION in src/index.ts); bump those
+# on main, tag vX.Y.Z, publish the release — CI owns npm auth via NPM_TOKEN.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    # Re-publish the version already on main (e.g. failed release run).
+    # Does not bump; create a Release for a real version cut.
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Fail closed if the release tag and package version disagree.
+      - name: Check release tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VER="$(node -p "require('./package.json').version")"
+          case "$TAG" in
+            "v$VER"|"$VER") echo "tag $TAG matches package $VER" ;;
+            *)
+              echo "::error::release tag '$TAG' must be v$VER or $VER (package.json)"
+              exit 1
+              ;;
+          esac
+
+      - name: Check PLUGIN_VERSION matches package.json
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./package.json').version")"
+          PIN="$(node -p "const s=require('fs').readFileSync('src/index.ts','utf8'); const m=/PLUGIN_VERSION = \"([^\"]+)\"/.exec(s); if(!m) process.exit(2); m[1]")"
+          test "$PIN" = "$VER" || {
+            echo "::error::PLUGIN_VERSION ($PIN) != package.json ($VER)"
+            exit 1
+          }
+
+      - run: npm ci
+      # prepublishOnly already runs test + typecheck; invoke explicitly so a
+      # red suite fails before npm touches the registry.
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

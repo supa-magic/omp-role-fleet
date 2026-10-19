@@ -16,6 +16,10 @@ exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
   despite frontmatter `thinking-level: low`.
 - Dispatch instructions require copying `effort` from the batch and no longer
   forbid it. `model` and `tools` remain forbidden on the task call.
+- GitHub Actions publish the package on a GitHub Release (`Publish to npm`,
+  same shape as `supa-magic/spm`): environment `npm` + `NPM_TOKEN`, no local
+  npm login. CI also runs test + typecheck on `main` and pull requests.
+
 
 ## 1.5.0
 
