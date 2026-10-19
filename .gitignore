@@ -11,3 +11,4 @@ node_modules/
 # Editor swap/backup files: they are per-machine state, never part of the repo.
 *.swp
 *.swo
+.archify/
