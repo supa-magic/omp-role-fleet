@@ -3,6 +3,20 @@
 Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
+
+## 1.5.1
+
+### Fixed — seat thinking / effort
+
+- Dispatch batches now carry per-seat `effort` (`lo` | `med` | `hi`) derived from
+  the seat's planned thinking level. Host precedence is caller `effort` >
+  modelRoles `:suffix` > agent `thinking-level`; without the field, a
+  `modelRoles.smol: …:auto` (or `:high`) suffix silently overrode scout `low`
+  and other seat budgets. Live runs showed `rf-scout` settling at `:high`
+  despite frontmatter `thinking-level: low`.
+- Dispatch instructions require copying `effort` from the batch and no longer
+  forbid it. `model` and `tools` remain forbidden on the task call.
+
 ## 1.5.0
 
 Correctness and post-dispatch ownership.

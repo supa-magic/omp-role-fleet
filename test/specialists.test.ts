@@ -601,7 +601,7 @@ test("dispatch guidance mentions the council only when one ran", async () => {
   assert.ok(!renderDispatch(dispatchGroups(plain), dir2).includes("review council"));
 });
 
-test("dispatch items carry roster names and no phantom model field", async () => {
+test("dispatch items carry roster names, effort, and no phantom model field", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-names-"));
   const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir, council: 3 });
   const agentsDir = join(dir, "agents");
@@ -610,6 +610,10 @@ test("dispatch items carry roster names and no phantom model field", async () =>
   assert.match(text, /"name": "Scout Smol"/);
   assert.match(text, /"name": "Implementer Task"/);
   assert.match(text, /"name": "ReviewerC1 Slow"/);
+  // Host precedence: task effort > modelRoles :suffix > agent thinking-level.
+  assert.match(text, /"effort": "lo"/);
+  assert.match(text, /"effort": "med"/);
+  assert.match(text, /"effort": "hi"/);
   // The task tool has no model field; emitting one invites schema errors.
   assert.ok(!text.includes('"model"'));
   // Roster ids stay within the plugin's 32-character budget.

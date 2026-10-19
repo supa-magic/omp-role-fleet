@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/candidate.json",
+    "sha256": "a8312776c02678303a26c5b4b4c1c1a522c82724ae718001694ca0a2e3c2e266",
+    "bytes": 10650
+  },
+  "artifact": {
+    "path": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/omp-role-fleet.html",
+    "sha256": "f8084a497eaec63a5c0622e9f333245546b74cea10767b33c436f12dd92c76d6",
+    "bytes": 831481
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/review-2/omp-role-fleet.finalize.json",
+    "summaryReceipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/review-2/omp-role-fleet.finalize-summary.json",
+    "browserCheckReceipt": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/review-2/omp-role-fleet.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-18T09:52:06.869Z",
+    "source": "network",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4496
+}

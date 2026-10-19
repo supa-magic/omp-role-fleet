@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "353fbb77-4fd2-4f1b-b1a8-e453728e52e4",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/candidate.json",
+  "output": "/Users/ab/Sites/omp-role-fleet/.archify/workflow-omp-role-fleet-20261018-115042/omp-role-fleet.html",
+  "specification": {
+    "sha256": "a8312776c02678303a26c5b4b4c1c1a522c82724ae718001694ca0a2e3c2e266",
+    "bytes": 10650
+  },
+  "artifact": {
+    "sha256": "f8084a497eaec63a5c0622e9f333245546b74cea10767b33c436f12dd92c76d6",
+    "bytes": 831481
+  }
+}

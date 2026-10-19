@@ -13,8 +13,8 @@
 import type { Dirent } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { RolePlan, RoleSpec, RunOutcome } from "./core.ts";
-import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves } from "./core.ts";
+import type { RolePlan, RoleSpec, RunOutcome, TaskEffort } from "./core.ts";
+import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves, taskEffort } from "./core.ts";
 
 /**
  * Ordering for run ids, in one place.
@@ -347,6 +347,12 @@ export interface EmittedAgent {
   model: string;
   /** Concrete `provider/id` behind `model`, when the host resolved it. */
   modelResolved?: string;
+  /**
+   * Coarse task-tool effort derived from the seat's thinking effort.
+   * Dispatch must pass this: host `effort` beats modelRoles `:suffix`, which
+   * otherwise erases agent-frontmatter `thinking-level`.
+   */
+  effort: TaskEffort;
   artifact: string;
   dependsOn: string[];
   /**
@@ -535,6 +541,7 @@ export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAg
         wave: i + 1,
         model: role.model,
         ...(role.modelResolved ? { modelResolved: role.modelResolved } : {}),
+        effort: taskEffort(role.effort),
         artifact: role.artifact,
         dependsOn: [...(role.dependsOn ?? [])],
         writesOwnReport: grantsWrite(role.tools),

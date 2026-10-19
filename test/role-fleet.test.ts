@@ -14,7 +14,7 @@ import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { aliasFor, bindFleet, isCouncilMember, MAX_SLICES, planWaves, READ_TOOLS, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
+import { aliasFor, bindFleet, isCouncilMember, MAX_SLICES, planWaves, READ_TOOLS, taskEffort, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
 import { gatePlan } from "../src/gate.ts";
 import { agentMarkdown, dispatchGroups, emitAgents, pruneGeneratedAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
@@ -38,6 +38,20 @@ test("every capability maps to an omp model-role alias", () => {
   // An unknown seat degrades to the general subagent role, never to a guess.
   assert.equal(aliasFor("unknown-seat"), "@task");
 });
+
+test("seat effort maps onto the task tool's lo/med/hi", () => {
+  // Host precedence: caller effort > modelRoles :suffix > agent thinking-level.
+  // Dispatch must pass these values or modelRoles erase planned seat effort.
+  assert.equal(taskEffort("off"), "lo");
+  assert.equal(taskEffort("minimal"), "lo");
+  assert.equal(taskEffort("low"), "lo");
+  assert.equal(taskEffort("medium"), "med");
+  assert.equal(taskEffort("auto"), "med");
+  assert.equal(taskEffort("high"), "hi");
+  assert.equal(taskEffort("xhigh"), "hi");
+  assert.equal(taskEffort("max"), "hi");
+});
+
 
 // ── plan synthesis ────────────────────────────────────────────────────────────
 
@@ -810,6 +824,7 @@ test("roster ids stay unique and within budget even when truncation collides", a
     path: "",
     wave: 2,
     model: "@task",
+    effort: "med" as const,
     artifact: "",
     dependsOn: [],
     writesOwnReport: false,
@@ -1387,17 +1402,19 @@ test("a consul run's reviewer, brief and dispatch all agree the seat is read-onl
 });
 
 test("dispatch instructions state the item contract, not just the identity", async () => {
-  // The batch carries `name` and `agent` only — that pair is what must not
-  // drift — while the host rejects an item without `task` and declares
-  // `solutionSpace` beside it. This text is where a dispatcher learns the rest
-  // of the item is theirs to fill, and it lives in the renderer so both
-  // surfaces state it.
+  // The batch carries `name`, `agent`, and `effort` — identity must not drift,
+  // and effort is the only spawn field that beats a modelRoles thinking suffix.
+  // The host rejects an item without `task` and declares `solutionSpace` beside
+  // it; this text is where a dispatcher learns the rest is theirs to fill.
   const dir = await mkdtemp(join(tmpdir(), "rf-guard-"));
   const dispatch = renderDispatch(dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir)), dir);
-  assert.match(dispatch, /Pass each item's `name` and `agent` exactly as given/);
+  assert.match(dispatch, /Pass each item's `name`, `agent`, and `effort` exactly as given/);
   assert.match(dispatch, /`task` text/);
   assert.match(dispatch, /solutionSpace/);
-  assert.match(dispatch, /Do NOT/);
+  assert.match(dispatch, /Do NOT invent or omit `effort`/);
+  assert.match(dispatch, /"effort": "lo"/); // scout
+  assert.match(dispatch, /"effort": "med"/); // implementer
+  assert.match(dispatch, /"effort": "hi"/); // reviewer
   assert.ok(!/"model"/.test(dispatch), "the batch must not carry a model field");
 });
 

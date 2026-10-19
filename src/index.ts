@@ -25,7 +25,7 @@ import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpec
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.5.0";
+const PLUGIN_VERSION = "1.5.1";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */

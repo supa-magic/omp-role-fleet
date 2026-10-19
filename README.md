@@ -658,17 +658,17 @@ flowchart TD
    so a task containing `---` cannot break the definition.
 7. **Dispatch** — the roles of one wave go out as a single parallel `task` batch;
    the next wave waits for the previous one. Each batch item carries a readable
-   roster `name` (role + model) instead of omp's random `AdjectiveNoun` defaults,
-   and the instructions that follow the batch name the rest of the item contract:
-   the host rejects an item with no `task` text and declares `solutionSpace`
-   beside it, and the batch deliberately carries neither — the identity is the
-   part that must not drift. The same instructions state what the call must *not*
-   carry (`model`, `tools`, `effort`: the definition pins all three), on both
-   surfaces, because the `role_fleet_plan` caller is the main model itself.
-   A read-only seat cannot place its own artifact, so the instructions name every
-   such path and tell the orchestrator to write the settled report there before the
-   next wave starts — otherwise a downstream seat is sent to read a file nobody
-   makes.
+   roster `name` (role + model), the agent id, and `effort` (`lo` | `med` | `hi`)
+   derived from the seat's planned thinking level. Host precedence is caller
+   `effort` > modelRoles `:suffix` > agent `thinking-level`, so without the field
+   a `modelRoles.smol: …:auto` suffix would erase scout `low`. The instructions
+   that follow require copying `name`/`agent`/`effort` exactly, filling `task` and
+   `solutionSpace`, and *not* setting `model` or `tools` (the definition pins
+   those). A read-only seat cannot place its own artifact, so the instructions
+   name every such path and tell the orchestrator to write the settled report
+   there before the next wave starts — otherwise a downstream seat is sent to
+   read a file nobody makes.
+
 
 ---
 

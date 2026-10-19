@@ -1,5 +1,5 @@
 /** Compact rendering of a plan, a verdict, and the dispatch groups. */
-import { isCouncilMember, isSliceSeat } from "./core.ts";
+import { isCouncilMember, isSliceSeat, type TaskEffort } from "./core.ts";
 import type { GateVerdict, RolePlan, RoleSpec } from "./core.ts";
 import type { DispatchGroup } from "./agents.ts";
 
@@ -120,6 +120,8 @@ export interface DispatchItem {
   role: string;
   model: string;
   modelResolved?: string;
+  /** Task-tool `lo`|`med`|`hi` — must ride the spawn so seat effort wins over modelRoles. */
+  effort: TaskEffort;
   artifact: string;
   dependsOn: string[];
   writesOwnReport: boolean;
@@ -152,6 +154,7 @@ export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
       role: a.role,
       model: a.model,
       ...(a.modelResolved ? { modelResolved: a.modelResolved } : {}),
+      effort: a.effort,
       artifact: a.artifact,
       dependsOn: [...a.dependsOn],
       writesOwnReport: a.writesOwnReport,
@@ -162,9 +165,9 @@ export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
 /**
  * One line per agent: roster id, role, and the model that runs it.
  *
- * The JSON batch the main model dispatches carries names only (the task tool
- * has no model field), so without this table the concrete model exists in the
- * run and nowhere in the output the user reads.
+ * The JSON batch carries `name`/`agent`/`effort` only (the task tool has no
+ * model field), so without this table the concrete model exists in the run and
+ * nowhere in the output the user reads.
  */
 function renderModelTable(
   agents: ReadonlyArray<{ agent: string; role: string; model: string; modelResolved?: string }>,
@@ -203,12 +206,14 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
     lines.push(`### Wave ${g.wave}${label}`, "");
     // `name` becomes the roster id; without it omp invents an AdjectiveNoun
     // name that says nothing about the role. `model` is deliberately absent:
-    // the task tool has no such field — the agent definition pins the model,
-    // and the roster shows the resolved one.
+    // the task tool has no such field — the agent definition pins the model.
+    // `effort` IS present: host precedence is caller effort > modelRoles
+    // `:suffix` > agent `thinking-level`, so without this field modelRoles
+    // erase the seat's planned thinking (scout low becomes :auto/:high).
     lines.push(
       "```json",
       JSON.stringify(
-        g.agents.map((a) => ({ name: a.name, agent: a.agent })),
+        g.agents.map((a) => ({ name: a.name, agent: a.agent, effort: a.effort })),
         null,
         2,
       ),
@@ -300,20 +305,19 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
     "Every agent above already exists as an omp agent definition whose model, tool",
     "grant, and thinking level are pinned in its file. Dispatch each wave with the",
     "task tool as a single batch, then wait for that wave before starting the next.",
-    // The identity is the one part that must be passed through verbatim: the
-    // roster `name` is what this table and every later wave address the seat by,
-    // and the host's task tool takes no model field, so the pair is the whole
-    // item. The host requires `task` on every item and declares `solutionSpace`
-    // beside it, while the batch above renders neither — the identity is what
-    // must not drift, so it is the only part rendered, and this is where a
-    // dispatcher learns the rest of the item is theirs to fill.
-    "Pass each item's `name` and `agent` exactly as given — the roster id is what",
-    "the table above and every later wave address that seat by — and give it its own",
-    "`task` text (the host rejects an item without one) plus a `solutionSpace` line",
-    "describing how open-ended that slice is. Do NOT set model, tools, or effort on",
-    "the task call: the task tool has no model field (the definition pins it),",
-    "treats a tools field as eval-defined tools, and overriding the agent's own",
-    "grant is what the definitions exist to prevent.",
+    // Identity + effort must pass through verbatim. The host requires `task` on
+    // every item and declares `solutionSpace` beside it; `effort` is the only
+    // spawn field that can beat a modelRoles thinking suffix, so it is rendered
+    // in the batch and must not be invented or dropped.
+    "Pass each item's `name`, `agent`, and `effort` exactly as given — the roster",
+    "id is what the table above and every later wave address that seat by, and",
+    "`effort` is the seat's thinking budget (`lo`/`med`/`hi`) the host applies over",
+    "modelRoles suffixes. Give each item its own `task` text (the host rejects an",
+    "item without one) plus a `solutionSpace` line describing how open-ended that",
+    "slice is. Do NOT set model or tools on the task call: the task tool has no",
+    "model field (the definition pins it), treats a tools field as eval-defined",
+    "tools, and overriding the agent's own grant is what the definitions exist to",
+    "prevent. Do NOT invent or omit `effort` — copy the value from the batch.",
     "",
   );
   return lines.join("\n");

@@ -359,10 +359,11 @@ test("the tool's dispatch instructions carry the batch guardrails", async () => 
   const dir = await mkdtemp(join(tmpdir(), "rf-toolguard-"));
   const result = await execute("id", { task: "fix the auth bug" }, null, null, { cwd: dir });
   const text = result.content[0].text;
-  assert.match(text, /Pass each item's `name` and `agent` exactly as given/);
+  assert.match(text, /Pass each item's `name`, `agent`, and `effort` exactly as given/);
   assert.match(text, /`task` text/);
   assert.match(text, /solutionSpace/);
-  assert.match(text, /Do NOT/);
+  assert.match(text, /Do NOT invent or omit `effort`/);
+  assert.match(text, /"effort": "lo"/);
 });
 
 test("the plan tool returns the dispatch batches as data", async () => {
@@ -389,6 +390,7 @@ test("the plan tool returns the dispatch batches as data", async () => {
   assert.ok(typeof seat === "object" && seat !== null);
   assert.ok("name" in seat && typeof seat.name === "string" && seat.name.length > 0, "each item carries its roster name");
   assert.ok("agent" in seat && typeof seat.agent === "string" && seat.agent.startsWith("rf-"));
+  assert.ok("effort" in seat && (seat.effort === "lo" || seat.effort === "med" || seat.effort === "hi"), "each item carries task effort");
   assert.ok("artifact" in seat && typeof seat.artifact === "string");
   assert.ok("wave" in first && first.wave === 1);
 });

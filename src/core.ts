@@ -397,6 +397,33 @@ export function aliasFor(core: string): string {
   return ROLE_ALIAS[core] ?? "@task";
 }
 
+/** Coarse task-tool effort. Host precedence: caller `effort` > model `:suffix` > agent `thinking-level`. */
+export type TaskEffort = "lo" | "med" | "hi";
+
+/**
+ * Map a seat's thinking effort onto the task tool's `lo` | `med` | `hi`.
+ *
+ * The host resolves modelRoles suffixes (e.g. `@smol` → `provider/id:auto`) with
+ * `explicitThinkingLevel`, which beats agent-frontmatter `thinking-level`. The only
+ * override that wins over that is per-spawn `effort` on the task call — so dispatch
+ * must carry this value or modelRoles silently erase the seat's planned effort.
+ */
+export function taskEffort(effort: Effort): TaskEffort {
+  switch (effort) {
+    case "off":
+    case "minimal":
+    case "low":
+      return "lo";
+    case "high":
+    case "xhigh":
+    case "max":
+      return "hi";
+    default:
+      // medium, auto, and any future value the type has not named yet
+      return "med";
+  }
+}
+
 /**
  * Dependency-ordered waves; roles inside a wave run in parallel.
  * A cycle releases the blocked roles together in a final wave so the dispatcher
