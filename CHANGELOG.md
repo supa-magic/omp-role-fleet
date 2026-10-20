@@ -4,6 +4,25 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## 1.5.2
+
+### Fixed — wave wait polling
+
+- Dispatch instructions no longer tell the orchestrator to "wait for that wave"
+  between batches. `wait` returns on the first settled seat, so a three-seat wave
+  produced three identical "waiting on N of M jobs" panels in the transcript —
+  one snapshot per call of the same running jobs. The host auto-delivers seat
+  results; the wave boundary is which seats have reported. Instructions now
+  state that results arrive on their own, forbid polling `wait` (call it only
+  when completely blocked), and gate the next wave on every seat of the previous
+  wave having delivered its result.
+
+### Docs
+
+- README trimmed to user-facing essentials (install, flags, models, runs, safety).
+
+
+
 ## 1.5.1
 
 ### Fixed — seat thinking / effort

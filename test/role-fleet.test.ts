@@ -1418,6 +1418,28 @@ test("dispatch instructions state the item contract, not just the identity", asy
   assert.ok(!/"model"/.test(dispatch), "the batch must not carry a model field");
 });
 
+test("dispatch does not tell the orchestrator to poll wait between waves", async () => {
+  // `wait` returns on the FIRST settled seat. Instructing "wait for that wave"
+  // produced one `wait` call per seat and one identical "waiting on N of M jobs"
+  // panel per call in the transcript. The host delivers results on their own
+  // ("Results auto-deliver; NEVER poll"); the wave boundary is which seats have
+  // reported, not something to be waited for.
+  const dir = await mkdtemp(join(tmpdir(), "rf-no-poll-"));
+  const groups = dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir));
+  assert.ok(groups.length >= 2, "a multi-wave plan is required to exercise the boundary text");
+  const text = renderDispatch(groups, dir);
+  assert.ok(
+    !/wait for (?:that|wave \d+) (?:wave |to settle)/i.test(text),
+    `dispatch still instructs a wait poll: ${text.slice(0, 600)}`,
+  );
+  assert.match(text, /do not poll `wait`/);
+  assert.match(text, /Call `wait` only when you are completely blocked/);
+  assert.match(text, /delivered (?:to you )?automatically/i);
+  assert.match(text, /Start the next wave only after every seat of this\s+wave has delivered\s+its result/);
+  // Per-wave boundary names the seats that must report, not a wait call.
+  assert.match(text, /Every seat of wave 1 reports on its own as it finishes/);
+});
+
 test("dispatch groups mirror dependency waves", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-groups-"));
   const groups = dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir));

@@ -222,7 +222,19 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
     );
     lines.push(`Agent definitions: \`${agentDir}\`.`);
     if (i < planned.length - 1) {
-      lines.push(`Wait for wave ${g.wave} to settle before starting wave ${g.wave + 1}.`, "");
+      // The old wording here was "Wait for wave N to settle before starting wave
+      // N+1", and it was read as a `wait` call. `wait` returns on the FIRST
+      // settled seat, not when the wave is done, so a three-seat wave produced
+      // three `wait` calls and three identical "waiting on 3 of 4 jobs" panels in
+      // the transcript — one per call, each a snapshot of the same running jobs.
+      // The host delivers every seat's result on its own
+      // (`task-async-contract.md`: "Results auto-deliver; NEVER poll"), so the
+      // wave boundary is a fact about which seats have reported, not something
+      // to be waited for.
+      lines.push(
+        `Every seat of wave ${g.wave} reports on its own as it finishes; start wave ${g.wave + 1} only after every seat of wave ${g.wave} has delivered its result.`,
+        "",
+      );
     }
   });
   lines.push(...renderModelTable(everyAgent, nameOf));
@@ -304,7 +316,12 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
   lines.push(
     "Every agent above already exists as an omp agent definition whose model, tool",
     "grant, and thinking level are pinned in its file. Dispatch each wave with the",
-    "task tool as a single batch, then wait for that wave before starting the next.",
+    "task tool as a single batch. Seat results are delivered to you automatically",
+    "as each seat finishes — do not poll `wait` for them (a `wait` call returns on",
+    "the FIRST settled seat and each call re-renders the same \"waiting on N jobs\"",
+    "panel). Call `wait` only when you are completely blocked and have nothing else",
+    "to do. Start the next wave only after every seat of this wave has delivered",
+    "its result.",
     // Identity + effort must pass through verbatim. The host requires `task` on
     // every item and declares `solutionSpace` beside it; `effort` is the only
     // spawn field that can beat a modelRoles thinking suffix, so it is rendered
