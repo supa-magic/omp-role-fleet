@@ -802,7 +802,18 @@ test("the plan tool declares every parameter its execute reads", () => {
   // Every key the execute body reads. Kept in step with the schema by hand, which
   // is the point: a parameter that is read but not declared arrives as undefined
   // at runtime and fails silently, so this list is the guard against that.
-  for (const key of ["task", "maxRoles", "allowlist", "dryRun", "council", "models", "consul", "reviewOnly", "slices"]) {
+  for (const key of [
+    "task",
+    "maxRoles",
+    "allowlist",
+    "dryRun",
+    "council",
+    "models",
+    "consul",
+    "reviewOnly",
+    "slices",
+    "autoConfirm",
+  ]) {
     assert.ok(declared.includes(key), `role_fleet_plan does not declare "${key}": ${declared.join(", ")}`);
   }
 });
@@ -1229,6 +1240,41 @@ test("the seat picker maps labels back to ids and an empty choice abandons", asy
   const last = declined.notices.at(-1);
   assert.equal(last?.level, "info", `a decline must not read as a failure: ${JSON.stringify(last)}`);
   assert.match(last?.text ?? "", /abandoned/, last?.text ?? "");
+});
+
+test("--yes skips the cast dialog and keeps every planned seat", async () => {
+  // Automation path: a human is not watching, so the recommended cast must ship
+  // without askDialog. Opening a menu here is how agent-driven fleets hang.
+  let asked = 0;
+  const dir = await mkdtemp(join(tmpdir(), "rf-yes-cmd-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  const { ctx, notices } = commandCtx(dir, {
+    ask: () => {
+      asked++;
+      return { kind: "submit", results: [] };
+    },
+  });
+  await handler("--yes fix the auth bug", ctx);
+  assert.equal(asked, 0, "askDialog must not open under --yes");
+  assert.ok(host.sent.length >= 1, "the run must dispatch");
+  assert.ok(
+    notices.some((n) => /auto-accepted recommended cast/i.test(n.text)),
+    `auto-accept notice missing: ${JSON.stringify(notices)}`,
+  );
+  // Full cast for a build task includes implementer + reviewer at minimum.
+  const msg = host.sent.at(-1)?.message ?? "";
+  assert.match(msg, /rf-implementer|rf-scout/);
+});
+
+test("parseFlags recognizes --yes and -y", () => {
+  const long = parseFlags(["--yes", "fix", "the", "bug"]);
+  assert.equal(long.flags.yes, true);
+  assert.equal(long.task, "fix the bug");
+  const short = parseFlags(["-y", "review", "auth"]);
+  assert.equal(short.flags.yes, true);
+  assert.equal(short.task, "review auth");
 });
 
 test("the cast screen names who can write before anything is spent", async () => {

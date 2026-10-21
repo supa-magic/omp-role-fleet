@@ -25,6 +25,8 @@ export interface Flags {
   consul?: string;
   reviewOnly?: boolean;
   slices?: number;
+  /** Skip the cast dialog and keep the recommended (as-planned) seats. */
+  yes?: boolean;
 }
 
 /**
@@ -122,6 +124,7 @@ export function parseFlags(words: string[]): { flags: Flags; task: string; probl
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     if (word === "--dry-run" || word === "-n") flags.dryRun = true;
+    else if (word === "--yes" || word === "-y") flags.yes = true;
     // A prompt is not a shell: `~` reaches the parser literally and `readFile`
     // cannot resolve it, so `--allowlist ~/fleet.json` failed with an ENOENT
     // naming a path that does not exist. Expanded here so the flag reflects what

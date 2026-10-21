@@ -25,7 +25,7 @@ import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpec
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.5.2";
+const PLUGIN_VERSION = "1.5.3";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -44,6 +44,7 @@ function runOptions(
   ctx: ExtensionContext,
   progress: Progress,
   onDispatch?: RunOptions["onDispatch"],
+  confirmMode?: "ask" | "auto",
 ): RunOptions {
   return {
     task: input.task,
@@ -64,9 +65,16 @@ function runOptions(
     propose: makeProposer(ctx),
     resolveModel: makeModelResolver(ctx),
     // One confirmation per run, before any agent file is written. Hosts
-    // without an interactive dialog dispatch straight through.
+    // without an interactive dialog dispatch straight through. Agents and
+    // `--yes` take the recommended cast without opening a dialog that no one
+    // can answer.
     pluginVersion: PLUGIN_VERSION,
-    confirm: makeConfirmer(ctx.ui, progress),
+    confirm: makeConfirmer(ctx.ui, progress, {
+      autoAcceptRecommended:
+        confirmMode === "auto" ||
+        input.yes === true ||
+        ctx.agent?.kind === "sub",
+    }),
     ...(onDispatch ? { onDispatch } : {}),
   };
 }
@@ -104,6 +112,8 @@ interface ArgumentCompletion {
 const FLAG_COMPLETIONS: ArgumentCompletion[] = [
   { value: "--dry-run", label: "--dry-run · plan only, write nothing, no paid tier" },
   { value: "-n", label: "-n · short form of --dry-run" },
+  { value: "--yes", label: "--yes · skip cast dialog, accept recommended seats" },
+  { value: "-y", label: "-y · short form of --yes" },
   { value: `--max-roles ${DEFAULT_MAX_ROLES}`, label: `--max-roles N · cap generated roles (default ${DEFAULT_MAX_ROLES})` },
   { value: "--allowlist ", label: "--allowlist FILE · pin models to a file instead of @aliases" },
   { value: "--review-only", label: "--review-only · scout and reviewers only, no seat can change the code" },
@@ -166,11 +176,31 @@ function makeProposer(ctx: { runEphemeralTurn?: ExtensionContext["runEphemeralTu
  * `askDialog` is absent in print and RPC modes — those hosts dispatch without
  * asking, which is exactly what the flags are for. The callback returns the
  * seats to keep, or `null` when the user declines.
+ *
+ * `autoAcceptRecommended` skips the dialog and keeps every planned seat — the
+ * same choice as the recommended "Run all of them" preset. Used when an agent
+ * drives the fleet (`role_fleet_plan`, a sub-session, or `--yes`): a menu no
+ * human is watching would hang the turn forever.
  */
 function makeConfirmer(
   ui: ExtensionCommandContext["ui"] | undefined,
   progress?: Progress,
+  opts?: { autoAcceptRecommended?: boolean },
 ): ((plan: RolePlan) => Promise<ReadonlySet<string> | null>) | undefined {
+  if (opts?.autoAcceptRecommended) {
+    return async (plan) => {
+      // Mirror the recommended preset (`as-planned`): every seat the plan named.
+      try {
+        ui?.notify?.(
+          `role-fleet: auto-accepted recommended cast (${plan.roles.length} seat(s))`,
+          "info",
+        );
+      } catch {
+        // Headless: the note in plan.notes still records the confirmation.
+      }
+      return new Set(plan.roles.map((r) => r.id));
+    };
+  }
   // Bound once: `askDialog` is optional on the host type, and narrowing it
   // outside the closure would not survive into the two awaits below. A context
   // with no UI at all (headless callers) takes the same path as no dialog.
@@ -434,7 +464,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
         for (const p of problems) ctx.ui.notify(p, "warning");
         if (!task) {
           ctx.ui.notify(
-            "usage: /role-fleet <task> [--dry-run|-n] [--max-roles N] [--allowlist FILE] [--review-only] [--council [N]] [--models (a,b,c)] [--consul MODEL] [--slices N] · /role-fleet report [run-id] · /role-fleet status · /role-fleet runs · /role-fleet doctor",
+            "usage: /role-fleet <task> [--yes|-y] [--dry-run|-n] [--max-roles N] [--allowlist FILE] [--review-only] [--council [N]] [--models (a,b,c)] [--consul MODEL] [--slices N] · /role-fleet report [run-id] · /role-fleet status · /role-fleet runs · /role-fleet doctor",
             "warning",
           );
           return;
@@ -542,14 +572,23 @@ export default function roleFleet(pi: ExtensionAPI): void {
         .max(MAX_SLICES)
         .optional()
         .describe("Fan the implementation out across this many writer seats (implementer-1 … -N)"),
+      // Agents drive this tool; a cast dialog no human answers would hang the
+      // turn. Default auto-accepts the recommended cast; set false to force the
+      // interactive menu when a human is watching.
+      autoConfirm: z
+        .boolean()
+        .optional()
+        .describe("Accept the recommended cast without a dialog (default true for agent automation)"),
     }),
-    async execute(_toolCallId, params: Flags & { task: string }, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: Flags & { task: string; autoConfirm?: boolean }, _signal, _onUpdate, ctx) {
       try {
         const progress = startProgress(ctx, ctx.ui, "role-fleet: choosing the cast…");
         let result: RunResult;
         try {
           // Same builder the command path uses, so a task whose wording asks
-          // for extra roles gets them on this path too.
+          // for extra roles gets them on this path too. Tool default is auto
+          // confirm: the model tool is the agent automation surface.
+          const auto = params.autoConfirm !== false;
           result = await runRoleFleet(
             runOptions(
               {
@@ -563,9 +602,12 @@ export default function roleFleet(pi: ExtensionAPI): void {
                 consul: params.consul,
                 reviewOnly: params.reviewOnly,
                 slices: params.slices,
+                ...(auto ? { yes: true } : {}),
               },
               ctx,
               progress,
+              undefined,
+              auto ? "auto" : "ask",
             ),
           );
         } finally {

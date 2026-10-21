@@ -4,6 +4,17 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## 1.5.3
+
+### Added — auto-accept recommended cast for agents
+
+- `--yes` / `-y` skips the cast confirmation dialog and keeps every planned seat
+  (same as the recommended "Run all of them" preset).
+- `role_fleet_plan` tool defaults `autoConfirm: true` so agent automation does
+  not hang on a menu nobody answers; set `autoConfirm: false` to force the
+  interactive dialog. Sub-session agents also auto-accept.
+
+
 ## 1.5.2
 
 ### Fixed — wave wait polling

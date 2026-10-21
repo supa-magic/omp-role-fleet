@@ -47,6 +47,7 @@ Watch agents live with **Alt+A** (Agent Hub).
 | Flag | Effect |
 |---|---|
 | `--dry-run`, `-n` | Plan only |
+| `--yes`, `-y` | Skip cast dialog — accept recommended seats (for agents/automation) |
 | `--council [N]` | N reviewers on different models (max 3) |
 | `--models (a,b,c)` | Review seats on these models, in order (max 5; brackets required) |
 | `--consul MODEL` | Model that reconciles council reports (default: session model) |
@@ -88,6 +89,8 @@ export ROLE_FLEET_ALLOWLIST=~/.omp/agent/role-fleet.json
 ### Confirm the cast
 
 Before anything is written you see the seats, models, and grants (read-only / edit / shell). Presets: run all, look-only, fewer reviewers, or pick seats. Dropping a seat drops its dependents. Headless hosts skip the dialog and dispatch.
+
+When an **agent** drives the fleet (`role_fleet_plan` tool, or `/role-fleet --yes`), the recommended cast is accepted automatically so the turn does not hang on a menu. Pass `autoConfirm: false` on the tool to force the dialog.
 
 ---
 
