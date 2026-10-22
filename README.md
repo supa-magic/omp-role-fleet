@@ -153,6 +153,11 @@ Artifacts and `plan.json` live under `.role-fleet/` (gitignored; newest 10 kept)
   export ROLE_FLEET_MCP_READONLY=mcp__codesearch_   # comma-separated prefixes
   ```
 
+  A prefix is the tool name as it appears in the seat's tool list: server names
+  are lowercased and every character outside `a-z0-9_` becomes `_`, so a server
+  named `my-server` is `mcp__my_server_`. The exact tool name also works
+  (`mcp__codesearch_search`).
+
   Seats that may write (implementer, tester) keep their MCP tools. Check the
   effective list with `/role-fleet doctor`.
 

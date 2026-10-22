@@ -194,7 +194,9 @@ export function mcpGuardVerdict(input: McpGuardInput): McpGuardVerdict {
       `role-fleet: \`${input.toolName}\` is not available to the read-only seat \`${input.agentName}\`. ` +
       `MCP tools are write-tier to the host and seats run unattended, so a read-only seat may only ` +
       `use the MCP tools the operator allowed (${allow}). Allow it with ` +
-      `${MCP_ALLOWLIST_ENV}=<tool-prefix>[,<tool-prefix>…] (e.g. ${MCP_ALLOWLIST_ENV}=mcp__codesearch_), ` +
-      `or use a seat that may write.`,
+      `${MCP_ALLOWLIST_ENV}=<tool-prefix>[,<tool-prefix>…] — the prefix is the tool name as it ` +
+      `appears in the seat's tool list (server names are lowercased and every character outside ` +
+      `a-z0-9_ becomes _), e.g. \`${MCP_ALLOWLIST_ENV}=mcp__codesearch_\` for the codesearch ` +
+      `server, or the exact tool name \`${input.toolName}\`. A seat that may write is not affected.`,
   };
 }

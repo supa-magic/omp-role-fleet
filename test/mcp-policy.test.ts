@@ -67,6 +67,10 @@ test("a read-only seat may not call an MCP tool the operator did not allow", () 
   assert.equal(verdict.block, true);
   assert.match(verdict.reason ?? "", /rf-scout/);
   assert.match(verdict.reason ?? "", /ROLE_FLEET_MCP_READONLY/);
+  // The reason has to say how the name is spelled: the operator copies the
+  // prefix out of the seat's tool list, where the server name is sanitized.
+  assert.match(verdict.reason ?? "", /as it appears in the seat's tool list/);
+  assert.match(verdict.reason ?? "", /mcp__codesearch_/);
 });
 
 test("an allowed MCP tool passes a read-only seat's guard", () => {
