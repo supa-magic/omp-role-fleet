@@ -1,6 +1,6 @@
 {
   "name": "@supa-magic/omp-role-fleet",
-  "version": "1.5.3",
+  "version": "1.6.0",
   "description": "Split a task into agent roles and dispatch them in parallel waves — zero configuration",
   "author": "Andrei Bunulu <bunulu@gmail.com>",
   "license": "MIT",

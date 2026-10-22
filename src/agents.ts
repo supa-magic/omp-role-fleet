@@ -15,6 +15,7 @@ import { lstat, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/
 import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec, RunOutcome, TaskEffort } from "./core.ts";
 import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves, taskEffort } from "./core.ts";
+import { isReadOnlyToolset, mcpAllowlistFromEnv, recordSeatToolset } from "./mcp-policy.ts";
 
 /**
  * Ordering for run ids, in one place.
@@ -250,6 +251,24 @@ function modelNote(model: string, resolved?: string): string {
 }
 
 /**
+ * The MCP tools a read-only seat may call, stated in the brief.
+ *
+ * The host treats every MCP tool as write-tier and gives them to every seat,
+ * and seats run unattended — so the plugin refuses the calls this seat was not
+ * allowed. The seat is told the rule up front rather than discovering it by
+ * having a tool call refused.
+ */
+function mcpGrantLine(): string {
+  const allowlist = mcpAllowlistFromEnv(process.env);
+  if (!allowlist.length) {
+    return "- No MCP tool is available to you: this seat is read-only and the operator allowed none. Use your own tools.";
+  }
+  return `- MCP tools are available to you only when their name starts with ${allowlist
+    .map((prefix) => `\`${prefix}\``)
+    .join(", ")}; any other MCP tool call is refused.`;
+}
+
+/**
  * The agent body: mission, task, acceptance bar, and hard constraints.
  *
  * `name` is the name the seat dispatches under, which is the seat id unless the
@@ -326,6 +345,11 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
     "## Constraints",
     "",
     `- Stay inside your tool grant: ${role.tools.join(", ")}.`,
+    // The host hands every connected MCP tool to every seat, whatever the
+    // grant says, so a read-only seat is told which MCP tools it may actually
+    // use — and that the rest are refused. Without the line the seat discovers
+    // the refusal by calling the tool.
+    ...(isReadOnlyToolset(role.tools) ? [mcpGrantLine()] : []),
     "- One writer per file; never edit files owned by another role in this plan.",
     "- Do not expand scope. Smallest correct change.",
     "- Report blockers with evidence. Never invent APIs or claim a check you did not run.",
@@ -636,6 +660,16 @@ export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAg
       await writeFile(a.path, agentMarkdown(plan, role, a.agent), "utf8");
     }),
   );
+
+  // The toolsets of the seats this run minted, so a later MCP tool call can be
+  // judged against the grant the seat actually got: a read-only seat holds
+  // every connected MCP tool (MCP is additive to a definition's `tools:`), and
+  // the host runs subagents unattended, so the plugin refuses the MCP calls a
+  // read-only seat was not allowed.
+  for (const a of emitted) {
+    const role = plan.roles.find((r) => r.id === a.role)!;
+    recordSeatToolset(a.agent, role.tools);
+  }
 
   await pruneGeneratedAgents(
     dir,

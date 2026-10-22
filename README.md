@@ -143,6 +143,18 @@ Artifacts and `plan.json` live under `.role-fleet/` (gitignored; newest 10 kept)
 - Tool grants are pinned per seat; shell only on implementer/tester-class seats.
 - Generated agents are `rf-*` only; hand-written agents are never touched.
 - Task text never enters frontmatter.
+- **Read-only seats get no MCP tools by default.** omp gives every seat every
+  connected MCP tool (a `tools:` list covers built-ins only), mints MCP tools
+  write-tier, and runs subagents unattended — so a write-capable MCP tool in a
+  "read-only" seat would run behind a screen that promised it could not write.
+  Read-only seats may call only the MCP tools you allow:
+
+  ```sh
+  export ROLE_FLEET_MCP_READONLY=mcp__codesearch_   # comma-separated prefixes
+  ```
+
+  Seats that may write (implementer, tester) keep their MCP tools. Check the
+  effective list with `/role-fleet doctor`.
 
 ---
 

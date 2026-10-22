@@ -201,6 +201,26 @@ async function hostToolResult(
   return notices;
 }
 
+/**
+ * Invoke the `tool_call` handler the factory registered.
+ *
+ * The MCP guard lives here, so the test drives the same seam the host does:
+ * a tool name, and the identity of the session making the call.
+ */
+async function hostToolCall(
+  host: StubHost,
+  event: { toolName: string; input?: Record<string, unknown> },
+  agent: { kind: string; name: string },
+  cwd: string,
+): Promise<{ block?: boolean; reason?: string } | undefined> {
+  const entry = host.handlers.get("tool_call");
+  assert.ok(entry, "the factory must register a tool_call guard");
+  return (await entry(
+    { type: "tool_call", toolCallId: "call-1", ...event },
+    { agent, cwd },
+  )) as { block?: boolean; reason?: string } | undefined;
+}
+
 test("the tool_result observer turns a settled fallback into a warning", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-observer-"));
   const host = stubHost();
@@ -247,6 +267,78 @@ test("the tool_result observer turns a settled fallback into a warning", async (
 
   // The same settled seat is not re-notified within one dispatch.
   assert.deepEqual(await hostToolResult(host, { toolName: "task", details: settled }), []);
+});
+
+test("a read-only seat may not call an MCP tool the operator did not allow", async () => {
+  // The host has no read-only tier for MCP: every MCP tool is minted
+  // write-tier, a definition's `tools:` list governs built-ins only, and
+  // subagents run unattended. So a seat the consent screen called read-only
+  // still holds every connected MCP tool — and a write-capable one would run
+  // without asking. The guard refuses it.
+  const dir = await mkdtemp(join(tmpdir(), "rf-mcp-guard-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("fix the auth bug", commandCtx(dir).ctx);
+
+  const before = process.env.ROLE_FLEET_MCP_READONLY;
+  delete process.env.ROLE_FLEET_MCP_READONLY;
+  try {
+    const refused = await hostToolCall(
+      host,
+      { toolName: "mcp__linear_create_issue" },
+      { kind: "sub", name: "rf-scout" },
+      dir,
+    );
+    assert.equal(refused?.block, true, `a read-only seat's MCP call must be refused: ${JSON.stringify(refused)}`);
+    assert.match(refused?.reason ?? "", /rf-scout/);
+    assert.match(refused?.reason ?? "", /ROLE_FLEET_MCP_READONLY/);
+
+    // The operator allows one server; its tools pass, other servers do not.
+    process.env.ROLE_FLEET_MCP_READONLY = "mcp__codesearch_";
+    const allowed = await hostToolCall(
+      host,
+      { toolName: "mcp__codesearch_search" },
+      { kind: "sub", name: "rf-scout" },
+      dir,
+    );
+    assert.equal(allowed, undefined, `an allowed MCP tool must pass: ${JSON.stringify(allowed)}`);
+
+    const stillRefused = await hostToolCall(
+      host,
+      { toolName: "mcp__linear_create_issue" },
+      { kind: "sub", name: "rf-scout" },
+      dir,
+    );
+    assert.equal(stillRefused?.block, true, `a non-allowed MCP tool must stay refused: ${JSON.stringify(stillRefused)}`);
+
+    // A seat that may write keeps its MCP tools: the guard is about read-only
+    // seats, and a writer may change the tree anyway.
+    const writer = await hostToolCall(
+      host,
+      { toolName: "mcp__linear_create_issue" },
+      { kind: "sub", name: "rf-implementer" },
+      dir,
+    );
+    assert.equal(writer, undefined, `a writer seat's MCP call must pass: ${JSON.stringify(writer)}`);
+
+    // The main session keeps its own MCP tools — the host's consent screen
+    // governs those, not this plugin.
+    const main = await hostToolCall(
+      host,
+      { toolName: "mcp__linear_create_issue" },
+      { kind: "main", name: "main" },
+      dir,
+    );
+    assert.equal(main, undefined, `the main session's MCP call must pass: ${JSON.stringify(main)}`);
+
+    // A built-in call is never touched.
+    const builtin = await hostToolCall(host, { toolName: "read" }, { kind: "sub", name: "rf-scout" }, dir);
+    assert.equal(builtin, undefined, `a built-in call must pass: ${JSON.stringify(builtin)}`);
+  } finally {
+    if (before === undefined) delete process.env.ROLE_FLEET_MCP_READONLY;
+    else process.env.ROLE_FLEET_MCP_READONLY = before;
+  }
 });
 
 test("the --review-only flag reaches the pipeline, not just the parser", async () => {
@@ -529,8 +621,9 @@ test("factory registers its command, its tool, and the session hooks", () => {
   assert.deepEqual([...host.commands.keys()], ["role-fleet"]);
   assert.deepEqual([...host.tools.keys()], ["role_fleet_plan"]);
   // session_start scopes the observation baseline; tool_result reads the model
-  // each settled seat actually ran on, which the plan alone cannot say.
-  assert.deepEqual(host.events.sort(), ["session_start", "tool_result"]);
+  // each settled seat actually ran on, which the plan alone cannot say;
+  // tool_call refuses the MCP tools a read-only seat was not allowed.
+  assert.deepEqual(host.events.sort(), ["session_start", "tool_call", "tool_result"]);
 });
 
 test("the command reports the version and prints usage for an empty task", async () => {

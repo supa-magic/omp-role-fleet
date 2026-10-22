@@ -22,10 +22,17 @@ import { renderRunList, renderRunReport, renderRunStatus } from "./report.ts";
 import { castPresets, seatRows } from "./confirm.ts";
 import { DEFAULT_MAX_ROLES, grantsWrite, isCouncilMember, MAX_SLICES, planWaves, type RolePlan } from "./core.ts";
 import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpectedModels } from "./model-observed.ts";
+import {
+  isMcpToolName,
+  mcpAllowlistFromEnv,
+  mcpGuardVerdict,
+  resetSeatToolsets,
+  seatToolset,
+} from "./mcp-policy.ts";
 import type { RoleProposer } from "./generate.ts";
 
 /** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.5.3";
+const PLUGIN_VERSION = "1.6.0";
 
 /** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
  *  the host's schema type resolves tool params to `unknown`. */
@@ -400,6 +407,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
     // guard keeps a child from wiping the parent's baseline mid-run.
     if (ctx.agent?.kind === "sub") return;
     resetExpectedModels();
+    resetSeatToolsets();
     ctx.ui.notify(`role-fleet ${PLUGIN_VERSION} ready · /role-fleet <task>`, "info");
   });
 
@@ -415,6 +423,28 @@ export default function roleFleet(pi: ExtensionAPI): void {
     for (const observation of observeSettledRuns(event.details)) {
       ctx.ui.notify(renderObservation(observation), observation.fallback ? "warning" : "info");
     }
+  });
+
+  // The gap this closes: a definition's `tools:` list governs built-ins only,
+  // and MCP tools stay additive — so a seat the consent screen called
+  // read-only still holds every connected MCP tool. The host mints MCP tools
+  // with `approval = "write"` and runs subagents with `tools.approvalMode:
+  // "yolo"`, so a write-capable MCP tool would run unattended behind a screen
+  // that promised the seat could not write. Read-only seats therefore get
+  // only the MCP tools the operator allowed by name.
+  pi.on("tool_call", async (event, ctx) => {
+    if (!isMcpToolName(event.toolName)) return;
+    if (ctx.agent?.kind !== "sub") return;
+    const seatTools = await seatToolset(ctx.agent.name, ctx.cwd).catch(() => undefined);
+    const verdict = mcpGuardVerdict({
+      toolName: event.toolName,
+      agentKind: ctx.agent.kind,
+      agentName: ctx.agent.name,
+      ...(seatTools ? { seatTools } : {}),
+      allowlist: mcpAllowlistFromEnv(process.env),
+    });
+    if (!verdict.block) return;
+    return { block: true, reason: verdict.reason };
   });
 
   pi.registerCommand("role-fleet", {
@@ -450,6 +480,9 @@ export default function roleFleet(pi: ExtensionAPI): void {
               `confirmation dialog: ${typeof ctx.ui?.askDialog === "function" ? "available" : "unavailable (dispatches without asking)"}`,
               `live status line: ${typeof ctx.ui?.setStatus === "function" ? "available" : "unavailable"}`,
               `async task snapshot: ${typeof ctx.getAsyncJobSnapshot === "function" ? "available" : "unavailable"}`,
+              `read-only seat MCP allowlist: ${
+                mcpAllowlistFromEnv(process.env).join(", ") || "(none — read-only seats may call no MCP tool)"
+              }`,
             ].join("\n"),
             "info",
           );

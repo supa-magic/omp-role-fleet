@@ -4,6 +4,28 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## 1.6.0
+
+### Added — read-only seats lose their MCP tools unless allowed
+
+- Read-only seats (scout, planner, reviewer, council, consul) may call only the
+  MCP tools the operator allowed by name. Everything else is refused before the
+  call runs, with a reason the model can act on.
+- Allowlist: `ROLE_FLEET_MCP_READONLY=mcp__codesearch_` (comma-separated tool
+  prefixes). Empty means a read-only seat may call no MCP tool at all.
+- Seats that may write (implementer, tester, docs) keep their MCP tools, and
+  the main session keeps its own — the host's own consent screen governs those.
+- The seat's brief states which MCP tools it may use, so it does not learn the
+  rule by having a call refused.
+- `/role-fleet doctor` prints the effective allowlist.
+
+Why: an agent definition's `tools:` list governs built-ins only — MCP, extension
+and custom tools stay additive — and every MCP tool is minted write-tier
+(`mcp/tool-bridge.ts`) while subagents run with `tools.approvalMode: "yolo"`
+(`task/executor.ts`). A seat the consent screen called read-only therefore held
+every connected MCP tool, and a write-capable one would have run unattended.
+
+
 ## 1.5.3
 
 ### Added — auto-accept recommended cast for agents
