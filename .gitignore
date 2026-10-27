@@ -12,3 +12,6 @@ node_modules/
 *.swp
 *.swo
 .archify/
+
+# codesearch's local index: a per-machine database, never part of the repo.
+.codesearch.db/
