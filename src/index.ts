@@ -10,32 +10,24 @@
  * resolved by the host through the user's `modelRoles`. There is nothing to
  * configure; an optional allowlist file pins concrete selectors when asked for.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { runRoleFleet, type RunOptions, type RunResult } from "./pipeline.ts";
 import { MAX_COUNCIL, MAX_MODELS, MAX_ROLES, parseFlags, type Flags } from "./flags.ts";
-import { dispatchPlan, renderDispatch, renderPlan, renderVerdict } from "./render.ts";
-import { persistSettledRuns } from "./ledger.ts";
+import { dispatchPlan, renderDispatch, renderVerdict, renderPlan } from "./render.ts";
+import { settleSeat } from "./ledger.ts";
 import { renderRunList, renderRunReport, renderRunStatus } from "./report.ts";
-import { castPresets, seatRows } from "./confirm.ts";
-import { DEFAULT_MAX_ROLES, grantsWrite, isCouncilMember, MAX_SLICES, planWaves, type RolePlan } from "./core.ts";
-import { observeSettledRuns, recordExpectedModels, renderObservation, resetExpectedModels } from "./model-observed.ts";
-import {
-  isMcpToolName,
-  mcpAllowlistFromEnv,
-  mcpGuardVerdict,
-  resetSeatToolsets,
-  seatToolset,
-} from "./mcp-policy.ts";
+import { castPresets, castQuestion, seatRows } from "./confirm.ts";
+import { AGENT_PREFIX, DEFAULT_MAX_ROLES, MAX_SLICES, planWaves, type RolePlan } from "./core.ts";
+import { renderObservation } from "./model-observed.ts";
+import { isMcpToolName, isReadOnlyToolset, mcpAllowlistFromEnv, mcpGuardVerdict } from "./mcp-policy.ts";
+import { clearNotifier, notify, seatRecord, setNotifier, type SeatRecord } from "./seats.ts";
 import type { RoleProposer } from "./generate.ts";
 
-/** Kept in step with package.json; shown in the session banner. */
-const PLUGIN_VERSION = "1.6.0";
-
-/** Parameters of `role_fleet_plan`, declared for the same reason as everywhere:
- *  the host's schema type resolves tool params to `unknown`. */
+/** The published version, read from the manifest that ships beside `src/`. */
+const PLUGIN_VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 /**
  * The one `runRoleFleet` call shape both surfaces use.
@@ -218,37 +210,11 @@ function makeConfirmer(
     // reads as a stuck process rather than as progress.
     progress?.pause();
     const presets = castPresets(plan);
-    const writers = plan.roles.filter((r) => grantsWrite(r.tools)).length;
-    const shells = plan.roles.filter((r) => r.tools.includes("bash")).length;
-    // The shell count is not folded into the writer count: a shell is wider than
-    // an editor's grant — any command, any path — and the question a user is
-    // answering here is what the run may do, so the reach is named.
-    const authority =
-      writers === 0
-        ? "no seat can change the code"
-        : `${writers} of ${plan.roles.length} seat(s) can change the code` +
-          (shells ? `, ${shells} of them with a shell: any command, any path` : "");
-    // The consent screen is where the spend is approved, so the council's
-    // independence has to be legible here — plan notes are printed after the
-    // dialog and cannot inform the answer. Aliases that resolve to one model
-    // buy one review several times.
-    const reviewers = plan.roles.filter((r) => isCouncilMember(r.id));
-    const reviewerModels = new Set(reviewers.map((r) => r.modelResolved ?? r.model));
-    const collapse =
-      reviewers.length > 1 && reviewerModels.size < reviewers.length
-        ? ` (${reviewerModels.size} distinct model${reviewerModels.size === 1 ? "" : "s"} across ${reviewers.length} reviewers)`
-        : "";
     const answer = await askDialog(
       [
         {
           id: "cast",
-          // The question names the vendors, because "run 4 seats" on its own is
-          // not a spend decision — four runs is. What the reader cannot see is
-          // which provider answers, and the options below do not fit on one line.
-          question: `Run ${plan.roles.length} seat(s) on ${plan.roles
-            .map((r) => r.modelResolved ?? r.model)
-            .filter((m, i, all) => all.indexOf(m) === i)
-            .join(", ")}?${collapse} ${authority}.`,
+          question: castQuestion(plan),
           options: presets.map((p) => ({ label: p.label, description: p.description, preview: p.preview })),
           // Index 0 is the proposal, so the cursor and the (Recommended) label
           // both land on it: accepting costs one Enter.
@@ -397,58 +363,90 @@ function makeModelResolver(ctx: ExtensionContext) {
 export default function roleFleet(pi: ExtensionAPI): void {
   const z = pi.zod;
 
+  // The factory is rebound for every session, subagents included, so these
+  // closure fields are per-session state. The seat record is pinned the first
+  // time it is found: a newer run (or a nested fleet) reuses `rf-*` names and
+  // re-points the registry, but this session still belongs to the run that
+  // started it.
+  let seat: SeatRecord | undefined;
+  let seatStartedAt: number | undefined;
+  let fallbackFrom: string | undefined;
+  const isSeatSession = (ctx: ExtensionContext): ctx is ExtensionContext & { agent: { kind: "sub"; name: string } } =>
+    ctx.agent?.kind === "sub" && ctx.agent.name.startsWith(AGENT_PREFIX);
+
+  let sink: ((text: string, level: "info" | "warning") => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
     // The version is in the banner on purpose: a stale extension module is the
     // single most confusing failure mode, since `/reload-plugins` does not
     // rebuild it and only a restart picks up new code.
-    // Expectations are process-level state: without the reset, a session started
-    // in the same process would compare a settled seat against the previous
-    // run's plan. Subagent sessions rebind this factory and start too, so the
-    // guard keeps a child from wiping the parent's baseline mid-run.
     if (ctx.agent?.kind === "sub") return;
-    resetExpectedModels();
-    resetSeatToolsets();
+    sink = (text, level) => ctx.ui.notify(text, level);
+    setNotifier(sink);
     ctx.ui.notify(`role-fleet ${PLUGIN_VERSION} ready · /role-fleet <task>`, "info");
   });
-
-  // The one place the host states which model a seat actually ran on: every
-  // settled `task` result carries it. Plan-time resolution records intent, and
-  // a retry fallback replaces exactly that — without this the alias and the
-  // plan keep claiming the intended model after the provider switched.
-  pi.on("tool_result", async (event, ctx) => {
-    if (event.toolName !== "task" || ctx.agent?.kind === "sub") return;
-    // Best-effort ledger: place read-only reports and record outcomes before
-    // the transient notification, so a missed line is still auditable later.
-    await persistSettledRuns(event.details).catch(() => ({ outcomes: [], written: [] }));
-    for (const observation of observeSettledRuns(event.details)) {
-      ctx.ui.notify(renderObservation(observation), observation.fallback ? "warning" : "info");
-    }
+  // Seat news must not go to a UI that is gone; another session's sink stays.
+  pi.on("session_shutdown", () => {
+    if (sink) clearNotifier(sink);
   });
 
-  // The gap this closes: a definition's `tools:` list governs built-ins only,
-  // and MCP tools stay additive — so a seat the consent screen called
-  // read-only still holds every connected MCP tool. The host mints MCP tools
-  // with `approval = "write"` and runs subagents with `tools.approvalMode:
-  // "yolo"`, so a write-capable MCP tool would run unattended behind a screen
-  // that promised the seat could not write. Read-only seats therefore get
-  // only the MCP tools the operator allowed by name.
-  pi.on("tool_call", async (event, ctx) => {
-    if (!isMcpToolName(event.toolName)) return;
-    if (ctx.agent?.kind !== "sub") return;
-    const seatTools = await seatToolset(ctx.agent.name, ctx.cwd).catch(() => undefined);
-    const verdict = mcpGuardVerdict({
-      toolName: event.toolName,
-      agentKind: ctx.agent.kind,
-      agentName: ctx.agent.name,
-      ...(seatTools ? { seatTools } : {}),
-      allowlist: mcpAllowlistFromEnv(process.env),
+  // Everything below observes or guards a *seat's own* session. None of it is
+  // registered as a tool lifecycle hook in the main session: the host refuses
+  // speculative task launch (and speculative reads) for every session in which
+  // any extension holds a `tool_call` / `tool_result` handler, so a global hook
+  // here would slow every task batch the user runs, fleet or not.
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!isSeatSession(ctx)) return;
+    // Each prompt of the seat starts its clock and its fallback history afresh,
+    // so a revived seat reports its own run, not the idle time before it.
+    seatStartedAt = Date.now();
+    fallbackFrom = undefined;
+    if (seat) return;
+    seat = await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined);
+    if (!seat || !isReadOnlyToolset(seat.tools)) return;
+    const tools = seat.tools;
+    // A definition's `tools:` list governs built-ins only, and MCP tools stay
+    // additive — so a seat the consent screen called read-only still holds every
+    // connected MCP tool. The host mints MCP tools write-tier and runs subagents
+    // unattended, so a read-only seat may call only the MCP tools the operator
+    // allowed by name. Installed here, in this seat's session alone.
+    pi.on("tool_call", (event, toolCtx) => {
+      if (!isMcpToolName(event.toolName)) return;
+      const verdict = mcpGuardVerdict({
+        toolName: event.toolName,
+        agentKind: toolCtx.agent?.kind ?? "main",
+        agentName: toolCtx.agent?.name ?? "",
+        seatTools: tools,
+        allowlist: mcpAllowlistFromEnv(process.env),
+      });
+      return verdict.block ? { block: true, reason: verdict.reason } : undefined;
     });
-    if (!verdict.block) return;
-    return { block: true, reason: verdict.reason };
+  });
+
+  pi.on("retry_fallback_applied", (event, ctx) => {
+    if (!isSeatSession(ctx)) return;
+    fallbackFrom ??= event.from;
+  });
+
+  // A seat's yield is the one place its full report and the model that produced
+  // it are both in hand, whether the parent runs seats as background jobs (the
+  // host default, whose `task` result carries no seat results) or inline.
+  pi.on("tool_execution_end", async (event, ctx) => {
+    if (event.toolName !== "yield" || event.isError || !isSeatSession(ctx)) return;
+    seat ??= await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined);
+    if (!seat) return;
+    const { result } = event;
+    const { observation } = await settleSeat({
+      record: seat,
+      details: typeof result === "object" && result !== null && "details" in result ? result.details : undefined,
+      ...(ctx.model ? { ran: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+      ...(fallbackFrom ? { fallbackFrom } : {}),
+      ...(seatStartedAt !== undefined ? { durationMs: Date.now() - seatStartedAt } : {}),
+    });
+    if (observation) notify(renderObservation(observation), observation.fallback ? "warning" : "info");
   });
 
   pi.registerCommand("role-fleet", {
-    description: "Split a task into agent roles and dispatch them in parallel waves",
+    description: "Split a task into agent roles and dispatch each as soon as its dependencies report",
     getArgumentCompletions: completeArguments,
     handler: async (args, ctx: ExtensionCommandContext) => {
       // Safety net: a command that throws is rendered by the host as an opaque
@@ -479,7 +477,6 @@ export default function roleFleet(pi: ExtensionAPI): void {
               `model resolution: ${typeof ctx.models?.resolve === "function" ? "available" : "unavailable (aliases shown unresolved)"}`,
               `confirmation dialog: ${typeof ctx.ui?.askDialog === "function" ? "available" : "unavailable (dispatches without asking)"}`,
               `live status line: ${typeof ctx.ui?.setStatus === "function" ? "available" : "unavailable"}`,
-              `async task snapshot: ${typeof ctx.getAsyncJobSnapshot === "function" ? "available" : "unavailable"}`,
               `read-only seat MCP allowlist: ${
                 mcpAllowlistFromEnv(process.env).join(", ") || "(none — read-only seats may call no MCP tool)"
               }`,
@@ -508,13 +505,6 @@ export default function roleFleet(pi: ExtensionAPI): void {
         try {
           result = await runRoleFleet(
             runOptions({ ...flags, task, cwd: ctx.cwd }, ctx, progress, async (approved) => {
-              // The settled-result observer compares what ran against this.
-              // Recorded before the batch is dispatched, so a fast wave cannot
-              // settle before the plan it is measured against exists. A
-              // subagent session runs its own fleet and must not overwrite the
-              // parent's baseline.
-              recordExpectedModels(approved.agents, { subSession: ctx.agent?.kind === "sub" });
-
               // An idle session does not start a turn for a plain sendMessage:
               // the batch would sit in history and never be executed. While a
               // turn is running, the batch steers the current one instead of
@@ -562,7 +552,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
     name: "role_fleet_plan",
     label: "Role Fleet Plan",
     description:
-      "Split a task into agent roles and return approved waves with per-role models and generated " +
+      "Split a task into agent roles and return the approved dispatch plan (who starts now, who waits on whom) with per-role models and generated " +
       "agent definitions. Use when a task needs several specialists that can run in parallel.",
     // Write, not read: a normal call emits and prunes `.omp/agents/rf-*.md`.
     // Declaring "read" let a mutation ride in under a read-tier policy.
@@ -615,33 +605,29 @@ export default function roleFleet(pi: ExtensionAPI): void {
     }),
     async execute(_toolCallId, params: Flags & { task: string; autoConfirm?: boolean }, _signal, _onUpdate, ctx) {
       try {
+        // The tool writes and prunes `.omp/agents/rf-*` and run trees, and
+        // extension tools reach every seat regardless of its `tools:` grant. A
+        // read-only seat must not gain that write — nor rewrite the definitions
+        // of seats in its own run that have not started yet.
+        if (isSeatSession(ctx)) {
+          const caller = seat ?? (await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined));
+          if (caller && isReadOnlyToolset(caller.tools)) {
+            return {
+              content: [{ type: "text" as const, text: `role_fleet_plan is not available to the read-only seat \`${ctx.agent.name}\`: it writes agent definitions and run files.` }],
+              isError: true,
+            };
+          }
+        }
         const progress = startProgress(ctx, ctx.ui, "role-fleet: choosing the cast…");
         let result: RunResult;
         try {
           // Same builder the command path uses, so a task whose wording asks
           // for extra roles gets them on this path too. Tool default is auto
-          // confirm: the model tool is the agent automation surface.
+          // confirm: the model tool is the agent automation surface. `yes`
+          // follows `autoConfirm` only, whatever else the arguments carry.
           const auto = params.autoConfirm !== false;
           result = await runRoleFleet(
-            runOptions(
-              {
-                task: params.task,
-                cwd: ctx.cwd,
-                dryRun: params.dryRun,
-                maxRoles: params.maxRoles,
-                allowlist: params.allowlist,
-                council: params.council,
-                models: params.models,
-                consul: params.consul,
-                reviewOnly: params.reviewOnly,
-                slices: params.slices,
-                ...(auto ? { yes: true } : {}),
-              },
-              ctx,
-              progress,
-              undefined,
-              auto ? "auto" : "ask",
-            ),
+            runOptions({ ...params, cwd: ctx.cwd, yes: auto }, ctx, progress, undefined, auto ? "auto" : "ask"),
           );
         } finally {
           progress.clear();
@@ -661,20 +647,17 @@ export default function roleFleet(pi: ExtensionAPI): void {
             details: { verdict: result.verdict },
           };
         }
+        // A dispatchable run carries its cast in the dispatch batches and model
+        // table already; repeating it as a plan listing only grows every later
+        // turn's transcript. A dry run has no dispatch, so it shows the plan.
+        const notes = result.plan.notes.length ? ["Notes:", ...result.plan.notes.map((n) => `  - ${n}`), ""] : [];
         const text = [
           renderVerdict(result.verdict),
           "",
-          renderPlan(result.plan, result.waves),
-          "",
-          params.dryRun ? "" : "Dispatch instructions:",
-          params.dryRun ? "" : renderDispatch(result.groups, result.agentDir ?? ""),
+          ...(params.dryRun
+            ? [renderPlan(result.plan, result.waves)]
+            : [...notes, "Dispatch instructions:", renderDispatch(result.groups, result.agentDir ?? "")]),
         ].join("\n");
-        // Same expectation baseline the command path records: the settled
-        // `task` results are compared against the plan the caller will dispatch.
-        // Guarded like the command path — a write-granted council member holds
-        // this tool, and its call would otherwise clear the parent's baseline
-        // while the parent's council is still settling.
-        if (!params.dryRun) recordExpectedModels(result.agents, { subSession: ctx.agent?.kind === "sub" });
         return {
           content: [{ type: "text" as const, text }],
           // The model gets the same batches the markdown renders, as data:

@@ -14,13 +14,12 @@ import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { aliasFor, bindFleet, isCouncilMember, MAX_SLICES, planWaves, READ_TOOLS, taskEffort, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
+import { bindFleet, isCouncilMember, planWaves, READ_TOOLS, taskEffort, validatePlan, type Fleet, type RolePlan, type RoleSpec } from "../src/core.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
 import { gatePlan } from "../src/gate.ts";
 import { agentMarkdown, dispatchGroups, emitAgents, pruneGeneratedAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
-import { parseFlags } from "../src/flags.ts";
-import { renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
+import { dispatchPlan, renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
 
 function planFor(task: string, maxRoles?: number) {
   return synthesizePlan({ task, cwd: "/tmp", workDir: "/tmp/wf", maxRoles });
@@ -28,15 +27,18 @@ function planFor(task: string, maxRoles?: number) {
 
 // ── alias mapping ─────────────────────────────────────────────────────────────
 
-test("every capability maps to an omp model-role alias", () => {
-  assert.equal(aliasFor("scout"), "@smol");
-  assert.equal(aliasFor("planner"), "@plan");
-  assert.equal(aliasFor("implementer"), "@task");
-  assert.equal(aliasFor("reviewer"), "@slow");
-  assert.equal(aliasFor("tester"), "@smol", "running checks is mechanical; diagnosis is the implementer's job");
-  assert.equal(aliasFor("security"), "@slow");
-  // An unknown seat degrades to the general subagent role, never to a guess.
-  assert.equal(aliasFor("unknown-seat"), "@task");
+test("the base cast rides the omp model-role aliases for its kind of work", () => {
+  // Recon and mechanical checks are cheap (`@smol`), implementation takes the
+  // general subagent role, planning its own role, review the strongest
+  // reasoning — users retarget a class of work by moving one alias in `/model`.
+  const model = (plan: RolePlan, id: string) => plan.roles.find((r) => r.id === id)?.model;
+  const fix = synthesizePlan({ task: "fix the bug", cwd: "/tmp", workDir: "/tmp/w" });
+  assert.equal(model(fix, "scout"), "@smol");
+  assert.equal(model(fix, "implementer"), "@task");
+  assert.equal(model(fix, "tester"), "@smol");
+  assert.equal(model(fix, "reviewer"), "@slow");
+  const broad = synthesizePlan({ task: "migrate the client across several files", cwd: "/tmp", workDir: "/tmp/w" });
+  assert.equal(model(broad, "planner"), "@plan");
 });
 
 test("seat effort maps onto the task tool's lo/med/hi", () => {
@@ -319,14 +321,14 @@ test("--consul adds a deciding seat after the council, and the orchestrator plac
   assert.ok(members.every((m) => m.model), "members exist");
   for (const role of [...result.plan!.roles.filter((r) => isCouncilMember(r.id)), consul!]) {
     assert.ok(!role.tools.includes("edit"), `${role.id} must not hold repo-wide edits`);
-    assert.ok(!role.tools.includes("write"), `${role.id} is read-only; its report is placed by the orchestrator`);
+    assert.ok(!role.tools.includes("write"), `${role.id} is read-only; its report is placed by the plugin`);
   }
   // Read-only does not mean path-less: the brief still names where the report
   // belongs and who writes it, since the seat itself cannot.
   for (const agent of [...members, result.agents.find((a) => a.role === "consul")!]) {
     const body = await readFile(agent.path, "utf8");
     assert.ok(body.includes(agent.artifact), `${agent.role} must be told where its report belongs`);
-    assert.match(body, /the orchestrator writes it there/, `${agent.role}'s brief must name the writer`);
+    assert.match(body, /the plugin writes it to/, `${agent.role}'s brief must name the writer`);
   }
   // The path the members' reports land at is the one the consul is told to read,
   // and the run says out loud who puts them there.
@@ -334,7 +336,7 @@ test("--consul adds a deciding seat after the council, and the orchestrator plac
   assert.match(consul!.acceptance.join(" "), /Every council report read in full/);
   assert.ok(
     result.plan!.notes.some(
-      (n) => n.includes("consul anthropic/claude-opus-4-6: reads 2 council report(s), placed at") && n.includes("by the orchestrator"),
+      (n) => n.includes("consul anthropic/claude-opus-4-6: reads 2 council report(s), placed at") && n.includes("by the plugin"),
     ),
     `the placement must be stated: ${result.plan!.notes.join(" | ")}`,
   );
@@ -384,110 +386,6 @@ test("the role cap never drops the consul", async () => {
   // A dropped consul would silently hand synthesis back to the session model,
   // so the run would look successful while doing the thing the user turned off.
   assert.ok(result.plan!.roles.some((r) => r.id === "consul"), "the deciding seat is exempt from the cap");
-});
-
-test("--consul refuses a follower that is task text and says how to spell it", () => {
-  const eaten = parseFlags(["--consul", "fix", "the", "login", "bug"]);
-  assert.equal(eaten.flags.consul, undefined);
-  // The refusal names the two accepted spellings rather than just rejecting: a
-  // bare id like `sonnet` is legitimate, it simply cannot be told apart from the
-  // task's first word in the spaced form. Pointing at `--consul=sonnet` is what
-  // makes the rejection actionable instead of a dead end.
-  assert.match(eaten.problems[0] ?? "", /--consul needs @alias or provider\/id/);
-  assert.match(eaten.problems[0] ?? "", /--consul=NAME/);
-  // The deciding seat stays on the session model, and the word is not lost.
-  assert.match(eaten.problems[0] ?? "", /session model/);
-  assert.equal(eaten.task, "fix the login bug");
-
-  const inline = parseFlags(["--consul=xai/grok-4", "fix the bug"]);
-  assert.equal(inline.flags.consul, "xai/grok-4");
-  assert.deepEqual(inline.problems, []);
-
-  // A model is `@alias` or `provider/id`, structurally. The earlier test was
-  // "contains @, /, or a digit", which accepted `/fix` and `v2` — task words that
-  // happen to carry one — and pinned them as selectors the host cannot resolve, so
-  // the seat ran on the parent's model while the plan claimed a provider it never
-  // had. A bare id is therefore refused in the spaced form, and the word stays in
-  // the task.
-  const bare = parseFlags(["--consul", "glm-5", "fix the bug"]);
-  assert.equal(bare.flags.consul, undefined);
-  assert.equal(bare.task, "glm-5 fix the bug", "the refused word must not vanish");
-
-  const digitWord = parseFlags(["--consul", "v2", "of the api", "is", "stale"]);
-  assert.equal(digitWord.flags.consul, undefined, "a task word carrying a digit is not a model");
-
-  // The same ids are reachable through the `=` form, where the user separated the
-  // value themselves — which is what closes the old asymmetry against `--models`,
-  // whose bracketed list has always taken `sonnet`.
-  for (const spelling of ["sonnet", "glm-5", "anthropic/claude-opus-4-6", "@slow"]) {
-    const via = parseFlags([`--consul=${spelling}`, "fix the bug"]);
-    assert.equal(via.flags.consul, spelling, `--consul=${spelling} was not taken`);
-    assert.deepEqual(via.problems, []);
-    assert.equal(via.task, "fix the bug");
-  }
-
-  // An alias is unambiguous, so the spaced form keeps working for it.
-  const aliased = parseFlags(["--consul", "@slow", "fix the bug"]);
-  assert.equal(aliased.flags.consul, "@slow");
-  assert.equal(aliased.task, "fix the bug");
-  // A leading slash is a path-shaped word, not a provider/id pair: the old
-  // "contains /" test accepted `/fix` and pinned a selector that resolves to
-  // nothing, which put the deciding seat on the parent's model while the plan
-  // named a provider it never had.
-  const slashWord = parseFlags(["--consul", "/fix", "the", "login", "bug"]);
-  assert.equal(slashWord.flags.consul, undefined, "a leading slash is not provider/id");
-  assert.equal(slashWord.task, "/fix the login bug");
-
-  // Quotes survive the host's whitespace-only split, so they must be stripped
-  // rather than pinned verbatim into the agent frontmatter.
-  const quoted = parseFlags(["--consul", '"xai/grok-4"', "fix the bug"]);
-  assert.equal(quoted.flags.consul, "xai/grok-4", `quotes leaked: ${JSON.stringify(quoted.flags.consul)}`);
-  assert.equal(quoted.task, "fix the bug");
-
-  // A blank value is the one thing that must never be pinned. `Boolean(" ")` is
-  // true, so a quoted `--consul=" "` would mint the deciding seat on a selector
-  // the host cannot resolve, and synthesis sees a truthy string and adds no note
-  // — the deciding seat then silently runs on the parent model, which is the
-  // exact outcome every other refusal in this parser exists to prevent.
-  for (const blank of ["--consul=", "--consul=   ", `--consul="${"  "}"`]) {
-    const empty = parseFlags([blank, "fix the bug"]);
-    assert.equal(empty.flags.consul, undefined, `a blank value was pinned: ${JSON.stringify(blank)}`);
-    assert.equal(empty.problems.length, 1, `no refusal reported for ${JSON.stringify(blank)}`);
-    assert.match(empty.problems[0] ?? "", /--consul needs @alias or provider\/id/);
-    assert.equal(empty.task, "fix the bug");
-  }
-});
-
-test("--consul takes a nested provider path in either spelling", () => {
-  // A router selector is more than one segment deep, and the spaced form
-  // accepted exactly one: `openrouter/anthropic/claude-4` was refused there and
-  // accepted through `--consul=`, so the same selector worked or failed
-  // depending on how it was typed.
-  const spaced = parseFlags(["--consul", "openrouter/anthropic/claude-4", "audit the api"]);
-  assert.equal(spaced.flags.consul, "openrouter/anthropic/claude-4");
-  assert.deepEqual(spaced.problems, []);
-  assert.equal(spaced.task, "audit the api", "the selector must not become task text");
-
-  // The shape test is still a shape test: a task word with a leading slash is
-  // not a model, and a bare name is still told to use the `=` form.
-  const word = parseFlags(["--consul", "/fix", "the bug"]);
-  assert.equal(word.flags.consul, undefined);
-  assert.match(word.problems[0] ?? "", /needs @alias or provider\/id/);
-});
-
-test("--models refuses a list with a bracket left inside an entry", () => {
-  // `(a,b))` unwraps to `a, b)`. Splitting it anyway pinned a selector of `b)`,
-  // which the host cannot resolve — the seat then ran on the parent's model
-  // while the plan and the roster both claimed a provider it never had.
-  const cut = parseFlags(["--models=(a,b))", "fix the bug"]);
-  assert.equal(cut.flags.models, undefined);
-  assert.match(cut.problems[0] ?? "", /malformed entries/);
-  assert.equal(cut.task, "fix the bug", "the task must survive the refusal");
-
-  // A well-formed list of the same length is still accepted.
-  const good = parseFlags(["--models=(a/1,b/2)", "fix the bug"]);
-  assert.deepEqual(good.flags.models, ["a/1", "b/2"]);
-  assert.deepEqual(good.problems, []);
 });
 
 test("the review model list is made usable before it reaches a seat", async () => {
@@ -603,7 +501,7 @@ test("a malformed allowlist entry is refused with its path and index", async () 
 test("emitted agents are valid omp definitions with alias models", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-agents-"));
   const plan = planFor("fix the auth bug in src/auth.ts and add tests");
-  const agents = await emitAgents(plan, dir);
+  const agents = (await emitAgents(plan, dir)).agents;
 
   assert.equal(agents.length, plan.roles.length);
   assert.equal((await readdir(dir)).length, plan.roles.length);
@@ -632,7 +530,7 @@ test("dirty task text cannot break the frontmatter", async () => {
     // Every top-level frontmatter key is a known one: task text lives only in
     // the body, and the nested `output:` schema block is indented, so a
     // zero-indent line is always a top-level key.
-    const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor", "output"]);
+    const known = new Set(["name", "description", "tools", "model", "thinking-level", "structured", "advisor", "output"]);
     for (const line of fm.split("\n").filter((l) => l.length > 0 && !/^\s/.test(l))) {
       assert.ok(known.has(line.split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
     }
@@ -649,7 +547,7 @@ test("a model name with a newline cannot inject frontmatter keys", () => {
   const role = { ...planFor("fix the bug").roles[0], model: '@task"\ntools: [write, bash]' };
   const fm = agentMarkdown(planFor("fix the bug"), role).split("---")[1] ?? "";
 
-  const known = new Set(["name", "description", "tools", "model", "thinking-level", "advisor", "output"]);
+  const known = new Set(["name", "description", "tools", "model", "thinking-level", "structured", "advisor", "output"]);
   for (const line of fm.split("\n").filter((l) => l.length > 0 && !/^\s/.test(l))) {
     assert.ok(known.has(line.split(":")[0]), `stray frontmatter line: ${line.slice(0, 60)}`);
   }
@@ -815,7 +713,6 @@ test("council members do not share one dependsOn array", () => {
 
 test("roster ids stay unique and within budget even when truncation collides", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-roster-"));
-  const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir });
   // Ids identical for far longer than the 32-character budget, so truncation
   // alone collapses them to one string.
   const twin = (id: string) => ({
@@ -828,6 +725,7 @@ test("roster ids stay unique and within budget even when truncation collides", a
     artifact: "",
     dependsOn: [],
     writesOwnReport: false,
+    tools: ["read"],
   });
   const groups: DispatchGroup[] = [
     {
@@ -966,6 +864,10 @@ test("every seat ships a report schema, so a bare summary cannot pass as a repor
     // deliverable. Without it a council member's paragraph is what the
     // synthesizer weighs, which is the failure this closes.
     assert.match(fm, /^output:/m, `${role.id} declares no output schema`);
+    // With the host's default `task.structured` off, a definition without this
+    // key gets no `yield` tool and its schema is ignored (verified live on omp
+    // 18.18.1): the seat's last paragraph becomes the whole result.
+    assert.match(fm, /^structured: true$/m, `${role.id} would lose its yield tool on a default host`);
     assert.match(fm, /^ {4}report:$/m, `${role.id} has no report field`);
     // The spelling is load-bearing, and both halves of it are: the host reads a
     // root with `properties` and no `type` as JTD, where `properties` are
@@ -985,7 +887,7 @@ test("every seat ships a report schema, so a bare summary cannot pass as a repor
     assert.match(fm, /^ {6}minLength: 1$/m, `${role.id} must reject an empty report`);
     // No self-reported model field: a seat is told only which model it was
     // pinned to, so asking it what ran is asking the question that a fallback
-    // invalidates. The host result carries the truth (model-observed.ts).
+    // invalidates. The seat's own session records what ran at its yield (ledger.ts).
     assert.ok(!fm.includes("model_used"), `${role.id} must not self-report the model it ran on`);
     const body = agentMarkdown(plan, role);
     assert.match(body, /`summary` is a headline/, `${role.id} does not separate summary from report`);
@@ -1009,7 +911,6 @@ test("a seat states the model it was pinned to and the one it resolved to", () =
 
 test("an upstream read-only dependency names its path and who writes it", () => {
   const plan = planFor("fix the auth bug");
-  const impl = plan.roles.find((r) => r.id === "implementer")!;
   const scoutArtifact = plan.roles.find((r) => r.id === "scout")!.artifact;
 
   // The tester waits on the implementer, a read-only dep waits on the scout.
@@ -1022,14 +923,14 @@ test("an upstream read-only dependency names its path and who writes it", () => 
     new RegExp(`\`scout\` → ${scoutArtifact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
     "a read-only dependency must still name its artifact path",
   );
-  assert.match(body, /orchestrator writes it here/, "and must say who puts it there");
+  assert.match(body, /the plugin writes its report here/, "and must say who puts it there");
 
   // A writable dependency needs no such explanation. The tester waits on the
   // implementer, which writes its own artifact — while the implementer's own
   // brief still carries the note, because it waits on the read-only planner.
   const testerBrief = agentMarkdown(plan, plan.roles.find((r) => r.id === "tester")!);
   assert.ok(
-    !testerBrief.includes("orchestrator writes it here"),
+    !testerBrief.includes("the plugin writes its report here"),
     "a writable upstream role writes its own report",
   );
 });
@@ -1231,30 +1132,26 @@ test("an older run's prune spares a newer, still-running run's agents", async ()
   );
 });
 
-test("the advisor rides the seats whose mistakes cost the whole wave", async () => {
+test("the advisor rides only the seat whose mistakes cost every later wave", async () => {
   // `advisor: true` pairs that seat's own session with the host's advisor-role
-  // model, which passively reviews each of its turns — the host's version of a
-  // stronger model at decision points. It is emitted for the planner, whose plan
-  // every later wave follows, and for the implementer seat including
-  // `migration-runner`, which runs that seat under its own id (`core`, not id, so
-  // a proposed writer is covered by the same rule). Review seats are excluded:
-  // their value is independence from the cast, so an advisor reviewing the
-  // reviewer's own turns buys agreement rather than a second opinion. And
-  // mechanical seats keep their cost — the host reviews every turn of an advised
-  // seat at the advisor model's rates, and nothing here is free.
+  // model, which passively reviews each of its turns. The planner earns it: its
+  // plan is followed by every later wave. The implementer does not: it is the
+  // longest-running seat on the critical path, an advisor pass on every turn
+  // paces the whole run, and tester and reviewers already cross-check it.
+  // Review seats stay independent of the cast.
   const dir = await mkdtemp(join(tmpdir(), "rf-advisor-"));
   const plan = planFor("migrate the api client off the old sdk across several files");
   const advised: string[] = [];
-  for (const agent of await emitAgents(plan, dir)) {
+  for (const agent of (await emitAgents(plan, dir)).agents) {
     if (/^advisor: true$/m.test(await readFile(agent.path, "utf8"))) advised.push(agent.role);
   }
-  assert.deepEqual(advised.sort(), ["migration-runner", "planner"]);
+  assert.deepEqual(advised.sort(), ["planner"]);
 
   // A vision seat keeps the flag it already had: the seat's model handles the
   // images, and the advisor is the host's own pairing, not a vision key.
   const visionDir = await mkdtemp(join(tmpdir(), "rf-advisor-vision-"));
   const vision: string[] = [];
-  for (const agent of await emitAgents(planFor("redesign the landing page"), visionDir)) {
+  for (const agent of (await emitAgents(planFor("redesign the landing page"), visionDir)).agents) {
     if (/^advisor: true$/m.test(await readFile(agent.path, "utf8"))) vision.push(agent.role);
   }
   assert.ok(vision.includes("designer"), `the vision seat lost its advisor: ${vision.join(",")}`);
@@ -1265,7 +1162,7 @@ test("a vision seat asks for the host's default advisor, not a model pattern", a
   const plan = planFor("redesign the landing page");
   const designer = plan.roles.find((r) => r.id === "designer");
   assert.ok(designer, "the designer seat must be part of the plan");
-  const emitted = await emitAgents(plan, dir);
+  const emitted = (await emitAgents(plan, dir)).agents;
   const body = await readFile(emitted.find((a) => a.role === "designer")!.path, "utf8");
   assert.match(body, /^advisor: true$/m);
   assert.ok(!body.includes('"@advisor"'), "a self-referential advisor pattern silently degrades in the host");
@@ -1281,7 +1178,7 @@ test("a catalog seat's description comes from its own purpose, once", async () =
   // it is for.
   const dir = await mkdtemp(join(tmpdir(), "rf-catalogdesc-"));
   const plan = planFor("migrate the api client to the new sdk and fix the tests");
-  const emitted = await emitAgents(plan, dir);
+  const emitted = (await emitAgents(plan, dir)).agents;
   const body = await readFile(emitted.find((a) => a.role === "migration-runner")!.path, "utf8");
   assert.match(body, /^description: "Role-fleet migration-runner: runs a dependency or framework migration/m);
   assert.match(
@@ -1307,7 +1204,7 @@ test("a dependency cycle is dispatched sequentially, not as one parallel batch",
     model: "@task",
   });
   const cycle = { task: "cycle", cwd: dir, roles: [role("alpha", ["beta"]), role("beta", ["alpha"])], notes: [] };
-  const groups = dispatchGroups(await emitAgents(cycle, dir));
+  const groups = dispatchGroups((await emitAgents(cycle, dir)).agents);
 
   assert.equal(groups.length, 1);
   assert.equal(groups[0].parallel, false, "a cycle released together is a conflict, not a batch");
@@ -1372,8 +1269,8 @@ test("a consul run's reviewer, brief and dispatch all agree the seat is read-onl
     `the member must carry no write grant: ${memberBody.slice(0, 400)}`,
   );
   assert.ok(
-    memberBody.includes(`it belongs at \`${member.artifact}\`, and the orchestrator writes it there`),
-    `the brief must route the report through the orchestrator: ${memberBody.slice(-600)}`,
+    memberBody.includes(`the plugin writes it to \`${member.artifact}\``),
+    `the brief must route the report through the plugin: ${memberBody.slice(-600)}`,
   );
   // Read-only is not written down as a hold on the seat: the grant line states
   // what it is, in the description the user's picker shows.
@@ -1385,12 +1282,12 @@ test("a consul run's reviewer, brief and dispatch all agree the seat is read-onl
   for (const m of plan.roles.filter((r) => isCouncilMember(r.id))) {
     assert.ok(consulBody.includes(m.artifact), `the consul must be routed to ${m.artifact}`);
   }
-  assert.match(consulBody, /read-only role — it returns the report, the orchestrator writes it here/);
+  assert.match(consulBody, /read-only role — the plugin writes its report here/);
 
   // And the dispatch names every member's artifact as a file the main model has
   // to write before the consul's wave starts.
   const dir = await mkdtemp(join(tmpdir(), "rf-consul-brief-"));
-  const agents = await emitAgents(plan, dir);
+  const agents = (await emitAgents(plan, dir)).agents;
   const dispatch = renderDispatch(dispatchGroups(agents), dir);
   const readOnly = agents.filter((a) => !a.writesOwnReport);
   for (const a of agents.filter((x) => isCouncilMember(x.role) || x.role === "consul")) {
@@ -1407,14 +1304,14 @@ test("dispatch instructions state the item contract, not just the identity", asy
   // The host rejects an item without `task` and declares `solutionSpace` beside
   // it; this text is where a dispatcher learns the rest is theirs to fill.
   const dir = await mkdtemp(join(tmpdir(), "rf-guard-"));
-  const dispatch = renderDispatch(dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir)), dir);
+  const dispatch = renderDispatch(dispatchGroups((await emitAgents(planFor("fix the auth bug"), dir)).agents), dir);
   assert.match(dispatch, /Pass each item's `name`, `agent`, and `effort` exactly as given/);
   assert.match(dispatch, /`task` text/);
   assert.match(dispatch, /solutionSpace/);
   assert.match(dispatch, /Do NOT invent or omit `effort`/);
   assert.match(dispatch, /"effort": "lo"/); // scout
-  assert.match(dispatch, /"effort": "med"/); // implementer
-  assert.match(dispatch, /"effort": "hi"/); // reviewer
+  assert.match(dispatch, /"effort": "med"/); // implementer, and the gating reviewer
+  assert.ok(!/"effort": "hi"/.test(dispatch), "a gate after a fix is not a high-effort review");
   assert.ok(!/"model"/.test(dispatch), "the batch must not carry a model field");
 });
 
@@ -1425,7 +1322,7 @@ test("dispatch does not tell the orchestrator to poll wait between waves", async
   // ("Results auto-deliver; NEVER poll"); the wave boundary is which seats have
   // reported, not something to be waited for.
   const dir = await mkdtemp(join(tmpdir(), "rf-no-poll-"));
-  const groups = dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir));
+  const groups = dispatchGroups((await emitAgents(planFor("fix the auth bug"), dir)).agents);
   assert.ok(groups.length >= 2, "a multi-wave plan is required to exercise the boundary text");
   const text = renderDispatch(groups, dir);
   assert.ok(
@@ -1434,19 +1331,74 @@ test("dispatch does not tell the orchestrator to poll wait between waves", async
   );
   assert.match(text, /do not poll `wait`/);
   assert.match(text, /Call `wait` only when you are completely blocked/);
-  assert.match(text, /delivered (?:to you )?automatically/i);
-  assert.match(text, /Start the next wave only after every seat of this\s+wave has delivered\s+its result/);
-  // Per-wave boundary names the seats that must report, not a wait call.
-  assert.match(text, /Every seat of wave 1 reports on its own as it finishes/);
+  assert.match(text, /delivered\s+(?:to you\s+)?automatically/i);
+  // Readiness is per seat: no seat is held for a whole wave.
+  assert.match(text, /A seat starts once every seat it lists has delivered\s+its result/);
+  assert.ok(!/start wave \d+ only after/i.test(text), "no wave barrier in the instructions");
 });
 
 test("dispatch groups mirror dependency waves", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-groups-"));
-  const groups = dispatchGroups(await emitAgents(planFor("fix the auth bug"), dir));
+  const groups = dispatchGroups((await emitAgents(planFor("fix the auth bug"), dir)).agents);
   const impl = groups.flatMap((g) => g.agents).find((a) => a.role === "implementer")!;
   const review = groups.flatMap((g) => g.agents).find((a) => a.role === "reviewer")!;
   assert.ok(review.wave > impl.wave);
   assert.match(renderDispatch(groups, dir), /parallel task batch/);
+});
+
+test("a seat starts on its own dependencies, not behind a slow sibling of them", async () => {
+  // A wave barrier holds a seat for every seat of the previous wave. Here the
+  // implementer needs only the scout, and must not sit behind a long research
+  // seat that merely shares the scout's wave.
+  const dir = await mkdtemp(join(tmpdir(), "rf-dag-"));
+  const role = (id: string, dependsOn: string[], tools = ["read"]): RoleSpec => ({
+    id,
+    title: id,
+    mission: "m",
+    acceptance: ["a finding with file:line"],
+    core: id,
+    dependsOn,
+    tools,
+    effort: "low",
+    needsVision: false,
+    artifact: join(dir, `${id}.md`),
+    model: "@task",
+  });
+  const plan = {
+    task: "t",
+    cwd: dir,
+    runId: "run-1",
+    roles: [role("scout", []), role("research", []), role("implementer", ["scout"], ["read", "edit"]), role("reviewer", ["implementer", "research"])],
+    notes: [],
+  };
+  const groups = dispatchGroups((await emitAgents(plan, dir)).agents);
+  const text = renderDispatch(groups, dir);
+  const blocks = text.split(/^#{3,4} /m);
+  const now = blocks.find((b) => b.startsWith("Start now"))!;
+  assert.match(now, /"agent": "rf-scout"/);
+  assert.match(now, /"agent": "rf-research"/);
+  const implementer = blocks.find((b) => b.includes('"agent": "rf-implementer"'))!;
+  assert.match(implementer, /^After `Scout[^`]*`\s/, `held behind an unrelated seat: ${implementer.split("\n")[0]}`);
+  const reviewer = blocks.find((b) => b.includes('"agent": "rf-reviewer"'))!;
+  assert.match(reviewer.split("\n")[0]!, /Implementer.*Research|Research.*Implementer/);
+  // The same contract as data.
+  const items = dispatchPlan(groups).flatMap((g) => g.agents);
+  assert.equal(items.find((a) => a.role === "implementer")!.after.length, 1);
+  assert.equal(items.find((a) => a.role === "reviewer")!.after.length, 2);
+});
+
+test("the reviewer waits on a read-only specialist's findings, and a capped one leaves no dangling edge", () => {
+  // The reviewer checks findings: in a security review it must read the
+  // auditor's report, not run beside it. A wave barrier used to hide the
+  // missing edge; per-seat dispatch exposed it (blind A/B: the reviewer
+  // reported "the auditor's findings are not in this review").
+  const review = synthesizePlan({ task: "review src/auth.ts for security issues", cwd: "/tmp", workDir: "/tmp/w", reviewOnly: true });
+  assert.ok(review.roles.find((r) => r.id === "reviewer")!.dependsOn.includes("security-auditor"));
+  assert.deepEqual(validatePlan(review), []);
+  // Under the role cap the auditor is dropped; its edge goes with it.
+  const capped = synthesizePlan({ task: "fix the login bug and audit it for security", cwd: "/tmp", workDir: "/tmp/w" });
+  assert.ok(!capped.roles.some((r) => r.id === "security-auditor"));
+  assert.deepEqual(validatePlan(capped), []);
 });
 
 // ── end-to-end pipeline ───────────────────────────────────────────────────────
@@ -1737,20 +1689,6 @@ test("the returned verdict describes the cast that actually ships", async () => 
 
 // ── slice fan-out ─────────────────────────────────────────────────────────────
 
-test("--slices is parsed like the other fan-out flags", () => {
-  assert.deepEqual(parseFlags("fix the bug --slices 3".split(" ")).flags.slices, 3);
-  assert.deepEqual(parseFlags("fix the bug --slices=2".split(" ")).flags.slices, 2);
-  const capped = parseFlags("fix the bug --slices 99".split(" "));
-  assert.equal(capped.flags.slices, MAX_SLICES);
-  assert.ok(capped.problems.some((p) => p.includes("capped")), "a clamp is reported, never silent");
-  // A typo stays task text and the flag does not pretend to have been honoured:
-  // reading `--slices abc` as "no fan-out" would drop what was asked for.
-  const typo = parseFlags("fix the bug --slices abc".split(" "));
-  assert.equal(typo.flags.slices, undefined);
-  assert.match(typo.task, /abc$/);
-  assert.ok(typo.problems.some((p) => p.includes("positive whole number")));
-});
-
 test("the dispatch tells the orchestrator to name each slice seat's files", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-slice-dispatch-"));
   const result = await runRoleFleet({ task: "fix the login bug", cwd: dir, slices: 3 });
@@ -1846,7 +1784,7 @@ test("a renamed seat never takes another seat's base filename", async () => {
     { ...plan.roles[0]!, id: "scout", artifact: join(dir, "scout.md") },
     { ...plan.roles[0]!, id: "scout-2", artifact: join(dir, "scout-2.md") },
   ];
-  const emitted = await emitAgents(plan, dir);
+  const emitted = (await emitAgents(plan, dir)).agents;
   const paths = emitted.map((a) => a.path);
   assert.equal(new Set(paths).size, paths.length, `two seats share one file: ${paths.join(", ")}`);
   assert.equal(emitted.find((a) => a.role === "scout-2")!.agent, "rf-scout-2");
@@ -1877,8 +1815,8 @@ test("a stale foreign agent file is replaced quietly; a recent one warns", async
       `---\nname: rf-scout\ndescription: "stale"\n---\n<!-- role-fleet:generated -->\n<!-- role-fleet:run ${owner} -->\n`,
       "utf8",
     );
-    await emitAgents(plan, dir);
-    const noted = plan.notes.some((n) => n.includes("replaced agent file(s)"));
-    assert.equal(noted, expectNote, `${owner}: notes were ${plan.notes.join(" | ")}`);
+    const { notes } = await emitAgents(plan, dir);
+    const noted = notes.some((n) => n.includes("replaced agent file(s)"));
+    assert.equal(noted, expectNote, `${owner}: notes were ${notes.join(" | ")}`);
   }
 });

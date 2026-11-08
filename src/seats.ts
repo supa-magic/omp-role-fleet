@@ -1,0 +1,153 @@
+/**
+ * The seat registry: what each generated seat was granted, pinned to, and owes.
+ *
+ * One record per `rf-*` agent, filled once by the pipeline right after the run
+ * is emitted, and read from the seat's own session when it settles or calls a
+ * tool. Subagent sessions run in the parent's process and share this module, so
+ * the in-memory record is the normal path; a seat from a run this process did
+ * not emit (a restart, a revived subagent) is rebuilt from its agent file and
+ * the run's `plan.json`, which hold the same facts durably.
+ */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { AGENT_PREFIX } from "./core.ts";
+import { agentsDir, manifestPath } from "./run-layout.ts";
+
+/** Marks a file as plugin-generated so stale runs can be pruned safely. */
+export const GENERATED_MARKER = "<!-- role-fleet:generated -->";
+
+/** Which run wrote an agent file: `run-<epoch ms>`. */
+export const RUN_MARKER = /<!-- role-fleet:run (run-\d+) -->/;
+
+export interface SeatRecord {
+  agent: string;
+  runId: string;
+  /** The run's `plan.json`, where this seat's outcome is appended. */
+  manifestPath: string;
+  /** Where the seat's full report belongs. */
+  artifact: string;
+  /** False: the seat cannot write, so the plugin places its report. */
+  writesOwnReport: boolean;
+  /** The built-in grant the seat's definition pins. */
+  tools: string[];
+  /** The selector pinned in the agent file: an alias or a concrete id. */
+  pinned: string;
+  /** Concrete `provider/id` resolved at plan time, when the host could answer. */
+  resolved?: string;
+}
+
+/** The emitted-seat fields a record is built from (`EmittedAgent` carries them). */
+export interface EmittedSeat {
+  agent: string;
+  artifact: string;
+  writesOwnReport: boolean;
+  tools: string[];
+  model: string;
+  modelResolved?: string;
+}
+
+const seats = new Map<string, SeatRecord>();
+
+type Notify = (text: string, level: "info" | "warning") => void;
+let notifier: Notify | undefined;
+
+function recordOf(cwd: string, runId: string, a: EmittedSeat): SeatRecord {
+  return {
+    agent: a.agent,
+    runId,
+    manifestPath: manifestPath(cwd, runId),
+    artifact: a.artifact,
+    writesOwnReport: a.writesOwnReport,
+    tools: [...a.tools],
+    pinned: a.model,
+    ...(a.modelResolved ? { resolved: a.modelResolved } : {}),
+  };
+}
+
+/**
+ * Record the seats a run just emitted. Agent names are reused across runs, and
+ * the emitter has just overwritten their files on disk, so the newest run wins
+ * here exactly as it does there.
+ */
+export function registerRun(cwd: string, runId: string, agents: readonly EmittedSeat[]): void {
+  for (const a of agents) seats.set(a.agent, recordOf(cwd, runId, a));
+}
+
+/** Drop every in-memory record (tests; the disk record stays authoritative). */
+export function forgetSeats(): void {
+  seats.clear();
+}
+
+/**
+ * Where seat news goes: the main session's UI. A seat settles in its own
+ * session, whose UI nobody watches, so the main session registers its sink
+ * when it starts.
+ */
+export function setNotifier(notify: Notify): void {
+  notifier = notify;
+}
+
+/** Drop the sink if it is still this one: a session that ends takes its UI along. */
+export function clearNotifier(notify: Notify): void {
+  if (notifier === notify) notifier = undefined;
+}
+
+export function notify(text: string, level: "info" | "warning"): void {
+  notifier?.(text, level);
+}
+
+/**
+ * The record for a generated seat, or undefined for any other agent.
+ *
+ * The prefix test comes first and is the scope rule: a hand-written agent is
+ * never this plugin's to judge, and costs no disk read.
+ */
+export async function seatRecord(agent: string, cwd: string): Promise<SeatRecord | undefined> {
+  if (!agent.startsWith(AGENT_PREFIX)) return undefined;
+  return seats.get(agent) ?? (await seatFromDisk(agent, cwd));
+}
+
+/** Parse a definition's `tools: [...]` line (always written as a JSON array). */
+function toolsFromDefinition(body: string): string[] | undefined {
+  const match = /^tools:\s*(\[[^\]]*\])/m.exec(body);
+  if (!match) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(match[1]!);
+    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === "string") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function seatFromDisk(agent: string, cwd: string): Promise<SeatRecord | undefined> {
+  let body: string;
+  try {
+    body = await readFile(join(agentsDir(cwd), `${agent}.md`), "utf8");
+  } catch {
+    return undefined;
+  }
+  if (!body.includes(GENERATED_MARKER)) return undefined;
+  const runId = RUN_MARKER.exec(body)?.[1];
+  if (!runId) return undefined;
+  let entry: Partial<EmittedSeat> | undefined;
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath(cwd, runId), "utf8")) as { agents?: unknown };
+    entry = Array.isArray(manifest.agents)
+      ? (manifest.agents as Array<Partial<EmittedSeat>>).find((a) => a?.agent === agent)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+  const tools = Array.isArray(entry?.tools) ? entry.tools : toolsFromDefinition(body);
+  if (!entry || typeof entry.artifact !== "string" || typeof entry.model !== "string" || !tools) return undefined;
+  const record = recordOf(cwd, runId, {
+    agent,
+    artifact: entry.artifact,
+    writesOwnReport: entry.writesOwnReport === true,
+    tools,
+    model: entry.model,
+    ...(typeof entry.modelResolved === "string" ? { modelResolved: entry.modelResolved } : {}),
+  });
+  seats.set(agent, record);
+  return record;
+}

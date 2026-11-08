@@ -5,12 +5,11 @@
  */
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import roleFleet from "../src/index.ts";
-import { parseFlags } from "../src/flags.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { DEFAULT_MAX_ROLES } from "../src/core.ts";
 
@@ -188,93 +187,80 @@ function commandCtx(
   return { ctx, notices, statuses, asked };
 }
 
-/** Invoke the `tool_result` handler the factory registered on the stub host. */
-async function hostToolResult(
-  host: StubHost,
-  event: { toolName: string; details: unknown },
-  agent: { kind: string } = { kind: "main" },
-): Promise<Array<{ text: string; level: string }>> {
-  const entry = host.handlers.get("tool_result");
-  assert.ok(entry, "the factory must register a tool_result observer");
+/**
+ * One seat's own session. The host rebinds the factory for every session,
+ * subagents included, so a fresh stub host bound to the same factory stands in
+ * for it; module state (the seat registry, the notifier) is shared, as it is in
+ * the host's single process.
+ */
+function seatSession(name: string, cwd: string) {
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const ctx = (model?: { provider: string; id: string }) => ({ agent: { kind: "sub", name }, cwd, ...(model ? { model } : {}) });
+  const call = (event: string, payload: unknown, model?: { provider: string; id: string }) =>
+    host.handlers.get(event)?.(payload, ctx(model)) as unknown;
+  return {
+    host,
+    start: async () => void (await call("agent_start", { type: "agent_start" })),
+    toolCall: async (toolName: string) =>
+      (await call("tool_call", { type: "tool_call", toolCallId: "call-1", toolName, input: {} })) as
+        | { block?: boolean; reason?: string }
+        | undefined,
+    fallback: async (from: string, to: string) => void (await call("retry_fallback_applied", { type: "retry_fallback_applied", from, to, role: "default" })),
+    yielded: async (details: unknown, model?: { provider: string; id: string }) =>
+      void (await call("tool_execution_end", { type: "tool_execution_end", toolCallId: "y", toolName: "yield", isError: false, result: { content: [], details } }, model)),
+  };
+}
+
+/** The main session's start: registers where seat news is shown. */
+function mainSession(host: StubHost): Array<{ text: string; level: string }> {
   const notices: Array<{ text: string; level: string }> = [];
-  await entry(event, { agent, ui: { notify: (text: string, level: string) => notices.push({ text, level }) } });
+  host.handlers.get("session_start")!({}, { agent: { kind: "main", name: "main" }, ui: { notify: (text: string, level: string) => notices.push({ text, level }) } });
   return notices;
 }
 
-/**
- * Invoke the `tool_call` handler the factory registered.
- *
- * The MCP guard lives here, so the test drives the same seam the host does:
- * a tool name, and the identity of the session making the call.
- */
-async function hostToolCall(
-  host: StubHost,
-  event: { toolName: string; input?: Record<string, unknown> },
-  agent: { kind: string; name: string },
-  cwd: string,
-): Promise<{ block?: boolean; reason?: string } | undefined> {
-  const entry = host.handlers.get("tool_call");
-  assert.ok(entry, "the factory must register a tool_call guard");
-  return (await entry(
-    { type: "tool_call", toolCallId: "call-1", ...event },
-    { agent, cwd },
-  )) as { block?: boolean; reason?: string } | undefined;
-}
-
-test("the tool_result observer turns a settled fallback into a warning", async () => {
+test("a seat's yield in its own session places its report and announces a fallback in the main session", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-observer-"));
   const host = stubHost();
   roleFleet(host.pi as never);
+  const notices = mainSession(host);
+  const resolver = { resolve: (spec: string) => ({ provider: "mock", id: spec.replace("@", "role-") }) };
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("fix the auth bug", commandCtx(dir, { models: resolver }).ctx);
+  const runId = (await readdir(join(dir, ".role-fleet")))[0]!;
+  const manifest = async () =>
+    JSON.parse(await readFile(join(dir, ".role-fleet", runId, "plan.json"), "utf8")) as {
+      agents: Array<{ agent: string; artifact: string }>;
+      outcomes: Array<{ agent: string; ran?: string; fallback: boolean; verdict?: string }>;
+    };
+  const reviewer = (await manifest()).agents.find((a) => a.agent === "rf-reviewer")!;
 
-  // Plan and emit through the real tool path, which records the expectation
-  // baseline the observer compares against.
-  const tool = host.tools.get("role_fleet_plan")!;
-  const execute = tool.execute as (
-    id: string,
-    params: Record<string, unknown>,
-    a: unknown,
-    b: unknown,
-    ctx: unknown,
-  ) => Promise<{ isError?: boolean }>;
-  assert.equal((await execute("id", { task: "fix the auth bug" }, null, null, { cwd: dir })).isError, undefined);
+  const seat = seatSession("rf-reviewer", dir);
+  await seat.start();
+  await seat.fallback("mock/role-slow", "xai/grok-4");
+  notices.length = 0;
+  await seat.yielded({ data: { summary: "s", report: "FULL REVIEW", verdict: "fail" }, status: "success" }, { provider: "xai", id: "grok-4" });
 
-  const settled = {
-    results: [
-      {
-        index: 0,
-        id: "job-1",
-        agent: "rf-reviewer-c1",
-        exitCode: 0,
-        output: "",
-        resolvedModel: "xai/grok-4:high",
-        resolvedModelIsFallback: true,
-      },
-    ],
-  };
+  assert.equal((await readFile(reviewer.artifact, "utf8")).trim(), "FULL REVIEW");
+  const [outcome] = (await manifest()).outcomes;
+  assert.equal(outcome?.agent, "rf-reviewer");
+  assert.equal(outcome?.ran, "xai/grok-4");
+  assert.equal(outcome?.fallback, true);
+  assert.equal(outcome?.verdict, "fail");
+  assert.equal(notices.length, 1, JSON.stringify(notices));
+  assert.equal(notices[0]!.level, "warning");
+  assert.match(notices[0]!.text, /rf-reviewer — planned `mock\/role-slow`, ran `xai\/grok-4`, FALLBACK/);
 
-  const warned = await hostToolResult(host, { toolName: "task", details: settled });
-  assert.equal(warned.length, 1, `a fallback must notify: ${JSON.stringify(warned)}`);
-  assert.equal(warned[0]!.level, "warning", "a fallback is not an info line");
-  assert.match(warned[0]!.text, /rf-reviewer-c1/);
-  assert.match(warned[0]!.text, /ran `xai\/grok-4`/);
-  assert.match(warned[0]!.text, /FALLBACK/);
-
-  // A non-task tool carrying the same payload is not a fleet result.
-  assert.deepEqual(await hostToolResult(host, { toolName: "bash", details: settled }), []);
-
-  // A subagent session's own task calls are not the parent's fleet.
-  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: settled }, { kind: "sub" }), []);
-
-  // The same settled seat is not re-notified within one dispatch.
-  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: settled }), []);
+  // A yield in a session that is not a generated seat is none of the ledger's business.
+  const other = seatSession("explore", dir);
+  await other.yielded({ data: { report: "X" }, status: "success" });
+  assert.equal((await manifest()).outcomes.length, 1);
 });
 
 test("a read-only seat may not call an MCP tool the operator did not allow", async () => {
-  // The host has no read-only tier for MCP: every MCP tool is minted
-  // write-tier, a definition's `tools:` list governs built-ins only, and
-  // subagents run unattended. So a seat the consent screen called read-only
-  // still holds every connected MCP tool — and a write-capable one would run
-  // without asking. The guard refuses it.
+  // MCP tools are minted write-tier, a definition's `tools:` list governs
+  // built-ins only, and seats run unattended — so a read-only seat still holds
+  // every connected MCP tool. The guard is installed in that seat's session.
   const dir = await mkdtemp(join(tmpdir(), "rf-mcp-guard-"));
   const host = stubHost();
   roleFleet(host.pi as never);
@@ -284,61 +270,75 @@ test("a read-only seat may not call an MCP tool the operator did not allow", asy
   const before = process.env.ROLE_FLEET_MCP_READONLY;
   delete process.env.ROLE_FLEET_MCP_READONLY;
   try {
-    const refused = await hostToolCall(
-      host,
-      { toolName: "mcp__linear_create_issue" },
-      { kind: "sub", name: "rf-scout" },
-      dir,
-    );
+    const scout = seatSession("rf-scout", dir);
+    await scout.start();
+    const refused = await scout.toolCall("mcp__linear_create_issue");
     assert.equal(refused?.block, true, `a read-only seat's MCP call must be refused: ${JSON.stringify(refused)}`);
     assert.match(refused?.reason ?? "", /rf-scout/);
     assert.match(refused?.reason ?? "", /ROLE_FLEET_MCP_READONLY/);
 
-    // The operator allows one server; its tools pass, other servers do not.
     process.env.ROLE_FLEET_MCP_READONLY = "mcp__codesearch_";
-    const allowed = await hostToolCall(
-      host,
-      { toolName: "mcp__codesearch_search" },
-      { kind: "sub", name: "rf-scout" },
-      dir,
-    );
-    assert.equal(allowed, undefined, `an allowed MCP tool must pass: ${JSON.stringify(allowed)}`);
+    assert.equal(await scout.toolCall("mcp__codesearch_search"), undefined, "an allowed MCP tool must pass");
+    assert.equal((await scout.toolCall("mcp__linear_create_issue"))?.block, true, "other servers stay refused");
+    assert.equal(await scout.toolCall("read"), undefined, "a built-in call is never touched");
 
-    const stillRefused = await hostToolCall(
-      host,
-      { toolName: "mcp__linear_create_issue" },
-      { kind: "sub", name: "rf-scout" },
-      dir,
-    );
-    assert.equal(stillRefused?.block, true, `a non-allowed MCP tool must stay refused: ${JSON.stringify(stillRefused)}`);
+    // A seat that may write keeps its MCP tools and gets no guard at all.
+    const implementer = seatSession("rf-implementer", dir);
+    await implementer.start();
+    assert.ok(!implementer.host.events.includes("tool_call"));
 
-    // A seat that may write keeps its MCP tools: the guard is about read-only
-    // seats, and a writer may change the tree anyway.
-    const writer = await hostToolCall(
-      host,
-      { toolName: "mcp__linear_create_issue" },
-      { kind: "sub", name: "rf-implementer" },
-      dir,
-    );
-    assert.equal(writer, undefined, `a writer seat's MCP call must pass: ${JSON.stringify(writer)}`);
-
-    // The main session keeps its own MCP tools — the host's consent screen
-    // governs those, not this plugin.
-    const main = await hostToolCall(
-      host,
-      { toolName: "mcp__linear_create_issue" },
-      { kind: "main", name: "main" },
-      dir,
-    );
-    assert.equal(main, undefined, `the main session's MCP call must pass: ${JSON.stringify(main)}`);
-
-    // A built-in call is never touched.
-    const builtin = await hostToolCall(host, { toolName: "read" }, { kind: "sub", name: "rf-scout" }, dir);
-    assert.equal(builtin, undefined, `a built-in call must pass: ${JSON.stringify(builtin)}`);
+    // A hand-written agent's session is never this plugin's to police.
+    const handWritten = seatSession("my-reviewer", dir);
+    await handWritten.start();
+    assert.ok(!handWritten.host.events.includes("tool_call"));
   } finally {
     if (before === undefined) delete process.env.ROLE_FLEET_MCP_READONLY;
     else process.env.ROLE_FLEET_MCP_READONLY = before;
   }
+});
+
+test("a running seat keeps its own run when a newer run reuses its name", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-pinned-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("audit the deps", commandCtx(dir).ctx);
+  const [first] = (await readdir(join(dir, ".role-fleet"))).sort();
+
+  // Run A's scout starts, then run B is emitted under the same `rf-scout` name.
+  const scout = seatSession("rf-scout", dir);
+  await scout.start();
+  await handler("audit the deps again", commandCtx(dir).ctx);
+  const runs = (await readdir(join(dir, ".role-fleet"))).sort();
+  assert.equal(runs.length, 2);
+
+  await scout.yielded({ data: { summary: "s", report: "RUN A REPORT", verdict: "pass" }, status: "success" });
+  const manifest = async (run: string) =>
+    JSON.parse(await readFile(join(dir, ".role-fleet", run, "plan.json"), "utf8")) as { outcomes: unknown[] };
+  assert.equal((await manifest(first!)).outcomes.length, 1, "the outcome belongs to the run the seat started in");
+  assert.equal((await manifest(runs[1]!)).outcomes.length, 0, "the newer run must not inherit it");
+  assert.equal((await readFile(join(dir, ".role-fleet", first!, "scout.md"), "utf8")).trim(), "RUN A REPORT");
+});
+
+test("a read-only seat cannot plan a fleet; a writer seat can", async () => {
+  // The plan tool writes and prunes agent definitions, and extension tools
+  // reach every seat whatever its grant.
+  const dir = await mkdtemp(join(tmpdir(), "rf-nested-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("fix the auth bug", commandCtx(dir).ctx);
+
+  const call = async (name: string) => {
+    const seat = seatSession(name, dir);
+    await seat.start();
+    const execute = seat.host.tools.get("role_fleet_plan")!.execute as (...a: unknown[]) => Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
+    return execute("id", { task: "review the auth bug", dryRun: true }, null, null, { cwd: dir, agent: { kind: "sub", name } });
+  };
+  const refused = await call("rf-scout");
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0]!.text, /not available to the read-only seat `rf-scout`/);
+  assert.notEqual((await call("rf-implementer")).isError, true);
 });
 
 test("the --review-only flag reaches the pipeline, not just the parser", async () => {
@@ -614,16 +614,17 @@ test("a malformed allowlist names the offending entry, never just the file", asy
   }
 });
 
-test("factory registers its command, its tool, and the session hooks", () => {
+test("the main session holds no tool lifecycle hook", () => {
   const host = stubHost();
   roleFleet(host.pi as never);
 
   assert.deepEqual([...host.commands.keys()], ["role-fleet"]);
   assert.deepEqual([...host.tools.keys()], ["role_fleet_plan"]);
-  // session_start scopes the observation baseline; tool_result reads the model
-  // each settled seat actually ran on, which the plan alone cannot say;
-  // tool_call refuses the MCP tools a read-only seat was not allowed.
-  assert.deepEqual(host.events.sort(), ["session_start", "tool_call", "tool_result"]);
+  // The host refuses speculative task launch in any session where an extension
+  // holds `tool_call` or `tool_result`; registering either at load would slow
+  // every task batch the user runs, fleet or not.
+  assert.ok(!host.events.includes("tool_call"), host.events.join(", "));
+  assert.ok(!host.events.includes("tool_result"), host.events.join(", "));
 });
 
 test("the command reports the version and prints usage for an empty task", async () => {
@@ -753,70 +754,6 @@ test("a rejected plan is reported as an error and never dispatched", async () =>
   assert.equal(host.sent.length, 0, "a rejected plan must never be dispatched");
 });
 
-test("a child session must not wipe the parent's model baseline; a new session must", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "rf-reset-"));
-  const host = stubHost();
-  roleFleet(host.pi as never);
-
-  // Plan through the real command path with a host that resolves aliases, so a
-  // concrete baseline exists to lose.
-  const resolver = { resolve: (spec: string) => ({ provider: "mock", id: spec.replace("@", "role-") }) };
-  const { ctx, notices } = commandCtx(dir, { models: resolver });
-  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
-  await handler("fix the auth bug", ctx);
-  assert.equal(notices.length > 0, true, "the command must have planned");
-
-  const diverged = (model: string) => ({
-    results: [{ index: 0, id: "job-1", agent: "rf-reviewer", exitCode: 0, output: "", resolvedModel: model }],
-  });
-
-  // Extension factories rebind to every subagent session, and each of those
-  // fires `session_start`. A reset from a child would hand the parent a run with
-  // no baseline mid-flight, silencing every later divergence.
-  host.handlers.get("session_start")!({}, { agent: { kind: "sub", name: "task" }, ui: { notify: () => {} } });
-  assert.equal((await hostToolResult(host, { toolName: "task", details: diverged("other-a/model") })).length, 1);
-
-  // A real new session starts clean: the previous run's plan is not this run's
-  // expectation, and reporting against it would be a false alarm.
-  host.handlers.get("session_start")!({}, { agent: { kind: "main", name: "main" }, ui: { notify: () => {} } });
-  assert.deepEqual(await hostToolResult(host, { toolName: "task", details: diverged("other-b/model") }), []);
-});
-
-test("a child session planning must not overwrite the parent's baseline", async () => {
-  // The `session_start` and `tool_result` hooks both carry the sub-agent guard, and
-  // the record path did not. A council member that holds the plan tool — a write
-  // grant is exactly what makes that likely — clears the parent's baseline
-  // mid-flight, and every later divergence for the parent's seats degrades to
-  // "no plan-time baseline for this seat".
-  const dir = await mkdtemp(join(tmpdir(), "rf-child-"));
-  const host = stubHost();
-  roleFleet(host.pi as never);
-  const resolve = { resolve: (spec: string) => ({ provider: "mock", id: spec.replace("@", "role-") }) };
-
-  const parent = commandCtx(dir, { models: resolve });
-  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
-  await handler("fix the auth bug", parent.ctx);
-
-  // The child plans its own fleet in the same process.
-  const child = commandCtx(dir, { models: resolve, kind: "sub" });
-  await handler("review the auth bug", child.ctx);
-
-  // `rf-implementer` is in the parent's build plan and in no review-only plan, so
-  // the seat is only still measured if the child left the baseline alone. A seat
-  // both plans share (`rf-reviewer`) cannot tell the two cases apart: the child's
-  // own record would re-establish a baseline and hide the clobber.
-  const diverged = {
-    results: [{ index: 0, id: "job-1", agent: "rf-implementer", exitCode: 0, output: "", resolvedModel: "other/model" }],
-  };
-
-  // A parent seat settling on a different model is still measured against the
-  // parent's plan, so it reports a named baseline instead of losing it.
-  const notices = await hostToolResult(host, { toolName: "task", details: diverged });
-  assert.equal(notices.length, 1, "the parent's divergence went unreported");
-  assert.ok(!notices[0]!.text.includes("no plan-time baseline"), notices[0]!.text);
-  assert.match(notices[0]!.text, /planned `mock\/role-/, notices[0]!.text);
-});
-
 
 test("registered surfaces carry the fields omp requires", () => {
   const host = stubHost();
@@ -911,19 +848,13 @@ test("the plan tool declares every parameter its execute reads", () => {
   }
 });
 
-test("the banner version is the published version", () => {
-  // PLUGIN_VERSION is a hand-kept copy of package.json#version, and it is what
-  // `/role-fleet --version` and the session banner show. When the two drift, the
-  // first thing a user reports is "the plugin says it is a different version".
+test("the lockfile agrees with the published package", () => {
+  // The banner reads package.json at load; a lockfile left behind on a bump or
+  // a rename makes `npm ci` install this package under another identity.
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     name: string;
     version: string;
   };
-  const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  const declared = /PLUGIN_VERSION = "([^"]+)"/.exec(src)?.[1];
-  assert.ok(declared, "src/index.ts must declare PLUGIN_VERSION");
-  assert.equal(declared, pkg.version);
-
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as {
     name: string;
     version: string;
@@ -931,271 +862,8 @@ test("the banner version is the published version", () => {
   };
   assert.equal(lock.version, pkg.version);
   assert.equal(lock.packages[""]?.version, pkg.version);
-  // A rename that misses the lockfile leaves `npm ci` installing this package
-  // under its old name, which then disagrees with every artifact it builds.
   assert.equal(lock.name, pkg.name);
   assert.equal(lock.packages[""]?.name, pkg.name);
-});
-
-test("a non-numeric flag is reported instead of silently becoming NaN", () => {
-  // NaN council switches the feature off; NaN role cap empties the plan into an
-  // opaque "plan has no roles" rejection. Both must be visible to the user.
-  const bad = parseFlags(["--council=abc", "--max-roles", "zero", "fix the bug"]);
-  assert.equal(bad.flags.council, undefined);
-  assert.equal(bad.flags.maxRoles, undefined);
-  assert.equal(bad.problems.length, 2);
-  // The bad value is refused, not silently deleted from what the user typed: a
-  // word that is not a number is task text, and losing it would plan against a
-  // task the user never gave. The two problems above are what says "I did not
-  // understand --max-roles".
-  assert.equal(bad.task, "zero fix the bug");
-
-  const good = parseFlags(["--council", "--max-roles=6", "fix the bug"]);
-  assert.equal(good.flags.council, 3);
-  assert.equal(good.flags.maxRoles, 6);
-  assert.deepEqual(good.problems, []);
-});
-
-test("a trailing valueless flag names the missing value, not an empty string", () => {
-  // `--max-roles` as the last word has no value at all. Reporting it through the
-  // numeric path printed `(got "")` — quoting an argument the user never typed
-  // and sending them hunting for one they had already decided not to write —
-  // and it said so twice for a single flag.
-  const trailing = parseFlags(["fix the bug", "--max-roles"]);
-  assert.equal(trailing.flags.maxRoles, undefined);
-  assert.equal(trailing.problems.length, 1, `one flag, one problem: ${trailing.problems.join(" | ")}`);
-  assert.match(trailing.problems[0]!, /--max-roles needs a positive whole number/);
-  assert.ok(!trailing.problems[0]!.includes('""'), `must not quote an empty string: ${trailing.problems[0]}`);
-  assert.equal(trailing.task, "fix the bug");
-
-  // A word after the flag is named verbatim, and stays task text — the other
-  // half of the same rule.
-  const follower = parseFlags(["--max-roles", "zero", "fix the bug"]);
-  assert.equal(follower.problems.length, 1, `one flag, one problem: ${follower.problems.join(" | ")}`);
-  assert.match(follower.problems[0]!, /got "zero"/);
-  assert.equal(follower.task, "zero fix the bug");
-});
-
-test("flag values are consumed, not left to contaminate the task text", () => {
-  // `--council 5` used to leave `5` in the task, and the task lands in every
-  // emitted agent body and in the keyword heuristics.
-  const council = parseFlags(["--council", "5", "fix", "the", "bug"]);
-  assert.equal(council.flags.council, 3, "council size is capped at the alias pool");
-  assert.equal(council.task, "fix the bug");
-  assert.equal(council.problems.length, 1, "clamping is visible, not silent");
-
-  // A value must never eat the next flag: swallowing `--dry-run` here means the
-  // run writes agent files the user explicitly asked not to write.
-  const dryRun = parseFlags(["--max-roles", "--dry-run", "fix", "the", "bug"]);
-  assert.equal(dryRun.flags.dryRun, true);
-  assert.equal(dryRun.flags.maxRoles, undefined);
-  assert.equal(dryRun.problems.length, 1);
-  assert.equal(dryRun.task, "fix the bug");
-
-  // Out-of-range is clamped, not honoured.
-  const capped = parseFlags(["--max-roles=500", "fix", "the", "bug"]);
-  assert.equal(capped.flags.maxRoles, 8);
-  assert.equal(capped.problems.length, 1);
-});
-
-test("--models takes a bracketed list in order, task text stays intact", () => {
-  const listed = parseFlags(["--models", "(xai/grok-4,zai/glm-5,@slow)", "fix", "the", "bug"]);
-  assert.deepEqual(listed.flags.models, ["xai/grok-4", "zai/glm-5", "@slow"]);
-  assert.equal(listed.task, "fix the bug", "the model list must not leak into the task");
-  assert.deepEqual(listed.problems, []);
-
-  // The task can sit anywhere, including last, which is how it reads best:
-  // `/role-fleet --council --models (a,b) refactor the auth module`.
-  // The host splits on whitespace, so a spaced list arrives as three words and
-  // must be read until the brackets balance.
-  const spaced = parseFlags(["--models", "(xai/grok-4,", "zai/glm-5,", "anthropic/claude-opus-4-6)", "fix the bug"]);
-  assert.deepEqual(spaced.flags.models, ["xai/grok-4", "zai/glm-5", "anthropic/claude-opus-4-6"]);
-  assert.equal(spaced.task, "fix the bug");
-  assert.deepEqual(spaced.problems, []);
-
-  const promptLast = parseFlags(["--council", "--models", "(xai/grok-4, zai/glm-5)", "refactor the auth module"]);
-  assert.deepEqual(promptLast.flags.models, ["xai/grok-4", "zai/glm-5"], "spaces inside the brackets are trimmed");
-  assert.equal(promptLast.task, "refactor the auth module");
-  assert.deepEqual(promptLast.problems, []);
-
-  // Quotes survive the host's whitespace-only split, so they have to be stripped.
-  const quoted = parseFlags(["--models", '"(a/1,@task)"', "fix the bug"]);
-  assert.deepEqual(quoted.flags.models, ["a/1", "@task"]);
-  assert.equal(quoted.task, "fix the bug");
-
-  const inline = parseFlags(["--models=(xai/grok-4,zai/glm-5)", "fix the bug"]);
-  assert.deepEqual(inline.flags.models, ["xai/grok-4", "zai/glm-5"]);
-  assert.deepEqual(inline.problems, []);
-
-  // A bare id has no `,`, `/`, or `@` to identify it, and the brackets say
-  // where the list ends instead — the reason the form exists.
-  const bare = parseFlags(["--models", "(glm-5)", "fix the bug"]);
-  assert.deepEqual(bare.flags.models, ["glm-5"]);
-  assert.deepEqual(bare.problems, []);
-});
-
-test("--models never eats a word that is not bracketed", () => {
-  // The brackets are the safety mechanism: without them, deciding whether the
-  // next word is the list or the first word of the task is a guess, and
-  // `--models fix the login bug` would put reviewers on a model called `fix`
-  // and drop the task's first word. An unbracketed follower is left alone.
-  const eaten = parseFlags(["--models", "fix", "the", "login", "bug"]);
-  assert.equal(eaten.flags.models, undefined);
-  // The wording names what was actually wrong. With no bracket anywhere the scan
-  // walked the whole rest of the line, so echoing `collected` would throw the
-  // user's entire task back at them as if it were a malformed list; the no-bracket
-  // case names the one word that was not a list, and the partial-bracket case
-  // below reports the list it really did see.
-  assert.match(eaten.problems[0] ?? "", /--models needs a bracketed list like \(a,b,c\), got "fix"/);
-  assert.ok(!(eaten.problems[0] ?? "").includes("login"), `the whole task was echoed: ${eaten.problems[0]}`);
-  assert.equal(eaten.task, "fix the login bug", "nothing the user typed may disappear");
-
-  // A value must never eat the next flag.
-  const nextFlag = parseFlags(["--models", "--dry-run", "fix the bug"]);
-  assert.equal(nextFlag.flags.models, undefined);
-  assert.equal(nextFlag.flags.dryRun, true);
-  assert.equal(nextFlag.problems.length, 1);
-  assert.equal(nextFlag.task, "fix the bug");
-
-  const bare = parseFlags(["--models", "fix the bug"]);
-  assert.equal(bare.flags.models, undefined);
-  assert.equal(bare.problems.length, 1);
-  assert.equal(bare.task, "fix the bug");
-
-  // An unclosed bracket is not a list: nothing is consumed and the words stay
-  // task text, with the reason reported.
-  const unclosed = parseFlags(["--models", "(a,b", "fix the bug"]);
-  assert.equal(unclosed.flags.models, undefined);
-  assert.equal(unclosed.task, "(a,b fix the bug");
-  assert.match(unclosed.problems[0] ?? "", /balanced bracketed list/);
-
-  const empty = parseFlags(["--models=()", "fix the bug"]);
-  assert.equal(empty.flags.models, undefined);
-  assert.match(empty.problems[0] ?? "", /nothing usable/);
-  assert.equal(empty.task, "fix the bug");
-
-  // Inline, the brackets are optional — so an unbalanced one is the only
-  // signal that the list was cut short. Splitting it anyway would pin a
-  // selector like `(a` the host cannot resolve, and the seat would silently
-  // ride the parent model instead.
-  const cut = parseFlags(["--models=(a,b", "fix the bug"]);
-  assert.equal(cut.flags.models, undefined);
-  assert.match(cut.problems[0] ?? "", /unbalanced bracket list/);
-  assert.equal(cut.task, "fix the bug");
-
-  // The spaced scanner used to stop only at depth 0, so an over-closed list
-  // drove the depth negative and it consumed the rest of the line — then echoed
-  // the user's whole task back as if it were a malformed model list.
-  const overClosed = parseFlags(["--models", "(a))", "fix", "the", "login", "bug"]);
-  assert.equal(overClosed.flags.models, undefined);
-  assert.equal(overClosed.task, "(a)) fix the login bug", "nothing the user typed may disappear");
-  assert.ok(!(overClosed.problems[0] ?? "").includes("login"), `the task was echoed as a model list: ${overClosed.problems[0]}`);
-});
-
-test("--models=(a, b) finishes the list the host split in two", () => {
-  // The host splits on whitespace, so a bracketed value in the `=` form arrives
-  // as two words — `--models=(a,` and `b)`. Reading only the first refused the
-  // list *and* left `b)` in the task text, while the spaced spelling of the same
-  // list planned fine: the flag's meaning depended on how it was typed.
-  const split = parseFlags(["--models=(xai/grok-4,", "zai/glm-5)", "fix the bug"]);
-  assert.deepEqual(split.flags.models, ["xai/grok-4", "zai/glm-5"]);
-  assert.equal(split.task, "fix the bug", "the rest of the list must not become task text");
-  assert.deepEqual(split.problems, []);
-
-  // A bracket no later word closes is a list cut short, not one the host split:
-  // the value is the single word, and the refusal names the bracket.
-  const cut = parseFlags(["--models=(xai/grok-4,", "fix", "the", "bug"]);
-  assert.equal(cut.flags.models, undefined);
-  assert.match(cut.problems[0] ?? "", /unbalanced bracket list/);
-  assert.equal(cut.task, "fix the bug", "nothing the user typed may disappear");
-});
-
-test("--models collapses duplicates and caps the list", () => {
-  // Two council members on one model is the double-priced single review this
-  // feature exists to avoid; spawning it silently would read as two opinions.
-  const dupes = parseFlags(["--models", "(xai/grok-4,xai/grok-4,zai/glm-5)", "fix the bug"]);
-  assert.deepEqual(dupes.flags.models, ["xai/grok-4", "zai/glm-5"]);
-  assert.match(dupes.problems[0] ?? "", /duplicates dropped/);
-
-  const many = parseFlags(["--models", "(a/1,b/2,c/3,d/4,e/5,f/6)", "fix the bug"]);
-  assert.equal(many.flags.models?.length, 5);
-  assert.match(many.problems[0] ?? "", /capped at 5/);
-});
-
-test("an allowlist without a usable path is refused instead of falling through", () => {
-  // Falling through to ROLE_FLEET_ALLOWLIST would pin a file the user never
-  // named; falling through to nothing would silently run unpinned.
-  const bare = parseFlags(["fix", "the", "bug", "--allowlist"]);
-  assert.equal(bare.flags.allowlist, undefined);
-  assert.equal(bare.problems.length, 1);
-  assert.equal(bare.task, "fix the bug");
-
-  const empty = parseFlags(["fix", "the", "bug", "--allowlist="]);
-  assert.equal(empty.flags.allowlist, undefined);
-  assert.equal(empty.problems.length, 1);
-
-  // A prompt is not a shell, so `~` is expanded here — `readFile` cannot.
-  const good = parseFlags(["fix", "the", "bug", "--allowlist", "~/fleet.json"]);
-  assert.equal(good.flags.allowlist, join(homedir(), "fleet.json"));
-  assert.deepEqual(good.problems, []);
-
-  const inline = parseFlags(["fix", "the", "bug", "--allowlist=~/fleet.json"]);
-  assert.equal(inline.flags.allowlist, join(homedir(), "fleet.json"));
-});
-
-test("a numeric flag with no number leaves the task text intact", () => {
-  // `--max-roles fix the bug` used to swallow "fix" as the cap: the cap was
-  // then rejected as non-numeric and the task lost its first word, so the user
-  // was warned about a correct flag and the plan ran on a mutilated task.
-  const missing = parseFlags(["--max-roles", "fix", "the", "bug"]);
-  assert.equal(missing.flags.maxRoles, undefined);
-  assert.equal(missing.task, "fix the bug");
-  assert.equal(missing.problems.length, 1);
-
-  // A real number is still consumed, not left in the task.
-  const real = parseFlags(["fix", "the", "bug", "--max-roles", "3"]);
-  assert.equal(real.flags.maxRoles, 3);
-  assert.equal(real.task, "fix the bug");
-  assert.deepEqual(real.problems, []);
-
-  // Same rule for the council: a bare `--council` still means 3, but a
-  // non-numeric follower is the task, not a council size.
-  const bare = parseFlags(["review", "the", "auth", "code", "--council"]);
-  assert.equal(bare.flags.council, 3);
-  assert.equal(bare.task, "review the auth code");
-
-  // A typo must not silently become the largest council the plugin can run.
-  const worded = parseFlags(["review", "the", "auth", "code", "--council", "loudly"]);
-  assert.equal(worded.flags.council, 3, "the default council still runs");
-  assert.equal(worded.task, "review the auth code loudly");
-  assert.ok(
-    worded.problems.some((p) => p.includes("--council") && p.includes("loudly")),
-    `a mistyped council size must be reported: ${worded.problems.join(" | ")}`,
-  );
-
-  // And the cap reports the word it choked on, not an empty string.
-  const capWord = parseFlags(["fix", "the", "bug", "--max-roles", "four"]);
-  assert.ok(
-    capWord.problems.some((p) => p.includes("four")),
-    `the cap error must name the word: ${capWord.problems.join(" | ")}`,
-  );
-  assert.equal(capWord.task, "fix the bug four", "the word stays task text");
-});
-
-test("an unknown flag is reported, not silently absorbed into the task", () => {
-  // A typo'd `--dryrun` used to become task text and reached the brief of every
-  // emitted agent. It must still be reported; the word is kept so nothing the
-  // user typed disappears.
-  const typo = parseFlags(["fix", "the", "bug", "--dryrun"]);
-  assert.equal(typo.flags.dryRun, false);
-  assert.equal(typo.task, "fix the bug --dryrun");
-  assert.ok(
-    typo.problems.some((p) => p.includes("--dryrun")),
-    `an unknown flag must be reported: ${typo.problems.join(" | ")}`,
-  );
-
-  // A known flag is not reported as unknown.
-  assert.ok(!parseFlags(["fix", "the", "bug", "--dry-run"]).problems.some((p) => p.includes("unknown")));
 });
 
 test("flag completions are self-describing and match label words", () => {
@@ -1361,15 +1029,6 @@ test("--yes skips the cast dialog and keeps every planned seat", async () => {
   assert.match(msg, /rf-implementer|rf-scout/);
 });
 
-test("parseFlags recognizes --yes and -y", () => {
-  const long = parseFlags(["--yes", "fix", "the", "bug"]);
-  assert.equal(long.flags.yes, true);
-  assert.equal(long.task, "fix the bug");
-  const short = parseFlags(["-y", "review", "auth"]);
-  assert.equal(short.flags.yes, true);
-  assert.equal(short.task, "review auth");
-});
-
 test("the cast screen names who can write before anything is spent", async () => {
   // Authority is two tiers now: only `edit` can change a file, and a council
   // member holds nothing extra. That fact used to be invisible on the screen
@@ -1387,12 +1046,13 @@ test("the cast screen names who can write before anything is spent", async () =>
     },
   );
   const screen = asked.join("\n");
-  // One seat of the six can change the code (the implementer), and it is also the
-  // one holding a shell, so the question names both facts before anything is
-  // spent rather than folding the shell into the editor count.
+  // Two seats of the six can change the code (implementer and tester — a bare
+  // "refactor the auth module" earns no planner), and both hold a shell, so the
+  // question names both facts before anything is spent rather than folding the
+  // shell into the editor count.
   assert.match(
     screen,
-    /\b1 of 6 seat\(s\) can change the code, 1 of them with a shell/,
+    /\b2 of 6 seat\(s\) can change the code, 2 of them with a shell/,
     `the dialog hid who can write:\n${screen}`,
   );
   // Every roster line names its own tier, and the line is the last word on it:

@@ -10,13 +10,22 @@
  * count past the cap.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-import { BUILD_TOOLS, CAPABILITY_ID, grantsWrite, VOCAB } from "./core.ts";
+import { BUILD_TOOLS, grantsWrite, SEAT_CATALOG, VOCAB } from "./core.ts";
 import { SPECIALISTS } from "./library.ts";
 
 /** One cheap model call; injected so tests run without a provider. */
 export type RoleProposer = (task: string) => Promise<string>;
 
-const PROPOSED_ALIAS = ["@smol", "@task", "@slow", "@plan", "@designer", "@vision"];
+// The aliases a proposal may name: the base cast's own aliases, plus the two
+// the catalog does not seat — the designer's, and the vision seat's.
+const PROPOSED_ALIAS = [
+  SEAT_CATALOG.base.scout.alias,
+  SEAT_CATALOG.base.code.alias,
+  SEAT_CATALOG.base.review.alias,
+  SEAT_CATALOG.base.plan.alias,
+  "@designer",
+  "@vision",
+];
 // Derived, not a third copy: the sandbox may grant a proposed role exactly the
 // tools a hand-written builder seat gets — a shell included, since a proposed
 // implementer that cannot run a check is a builder that cannot report one — so
@@ -117,7 +126,7 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
  *  hand-synced list is correct only until the catalog grows, and the failure is
  *  silent (a proposal that claims `designer` is refused instead of merged). */
 const BASE_CAST = new Set([
-  ...Object.values(CAPABILITY_ID),
+  ...Object.values(SEAT_CATALOG.base).map((seat) => seat.id),
   ...SPECIALISTS.map((s) => s.spec.id),
 ]);
 

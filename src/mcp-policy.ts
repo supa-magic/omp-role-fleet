@@ -14,11 +14,10 @@
  * only the MCP tools the operator allowed by name. Everything else is refused
  * before it runs, with a reason the model can act on.
  */
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { AGENT_PREFIX } from "./core.ts";
 
 /** MCP tool names are minted `mcp__<server>_<tool>`. */
-export const MCP_TOOL_PREFIX = "mcp__";
+const MCP_TOOL_PREFIX = "mcp__";
 
 /** Environment variable holding the allowed MCP tool prefixes, comma-separated. */
 export const MCP_ALLOWLIST_ENV = "ROLE_FLEET_MCP_READONLY";
@@ -31,7 +30,7 @@ export const MCP_ALLOWLIST_ENV = "ROLE_FLEET_MCP_READONLY";
  * plugin decides read-only-ness for seats it minted, and the host's constant is
  * not exported to extensions.
  */
-export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read",
   "wait",
   "grep",
@@ -93,63 +92,6 @@ export function isReadOnlyToolset(tools: readonly string[] | undefined): boolean
   return !!tools?.length && tools.every((tool) => READ_ONLY_TOOL_NAMES.has(tool));
 }
 
-/**
- * The toolsets of the seats this plugin minted, by agent name.
- *
- * Process-level, like the model-observation baseline: the seat runs in another
- * session of the same process, so the map has to outlive the command that
- * emitted the definition.
- */
-const seatToolsets = new Map<string, string[]>();
-
-/** Record a minted seat's toolset, so a later tool call can be judged. */
-export function recordSeatToolset(agent: string, tools: readonly string[]): void {
-  seatToolsets.set(agent, [...tools]);
-}
-
-/** Forget every recorded seat (a new run replaces the old cast). */
-export function resetSeatToolsets(): void {
-  seatToolsets.clear();
-}
-
-/**
- * The tools a seat was given, from the run that minted it.
- *
- * The in-process map first, then the definition file on disk: a seat spawned
- * by a previous run (a restarted session, a revived subagent) has no entry in
- * this process, and its file is the only record of what it was granted.
- */
-export async function seatToolset(agent: string, cwd: string): Promise<string[] | undefined> {
-  const known = seatToolsets.get(agent);
-  if (known) return known;
-  return readToolsetFromDefinition(agent, cwd);
-}
-
-/**
- * Parse the `tools:` list out of a generated agent definition.
- *
- * The plugin writes it as a JSON array (`tools: ["read", "grep"]`), so the
- * bracket contents parse as JSON; anything else is treated as unparseable and
- * the seat is left unjudged rather than guessed at.
- */
-async function readToolsetFromDefinition(agent: string, cwd: string): Promise<string[] | undefined> {
-  let body: string;
-  try {
-    body = await readFile(join(cwd, ".omp", "agents", `${agent}.md`), "utf8");
-  } catch {
-    return undefined;
-  }
-  const match = /^tools:\s*(\[[^\]]*\])/m.exec(body);
-  if (!match) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(match[1]!);
-    if (!Array.isArray(parsed)) return undefined;
-    return parsed.filter((entry): entry is string => typeof entry === "string");
-  } catch {
-    return undefined;
-  }
-}
-
 /** The decision the guard reaches for one tool call. */
 export interface McpGuardVerdict {
   block: boolean;
@@ -182,6 +124,8 @@ export interface McpGuardInput {
 export function mcpGuardVerdict(input: McpGuardInput): McpGuardVerdict {
   if (!isMcpToolName(input.toolName)) return { block: false };
   if (input.agentKind !== "sub") return { block: false };
+  // Hand-written agents are never this plugin's to police.
+  if (!input.agentName.startsWith(AGENT_PREFIX)) return { block: false };
   if (!input.seatTools) return { block: false };
   if (!isReadOnlyToolset(input.seatTools)) return { block: false };
   if (isAllowedMcpTool(input.toolName, input.allowlist)) return { block: false };

@@ -7,26 +7,22 @@
  * field is printed as unknown instead of invented.
  */
 import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import type { RunManifest } from "./agents.ts";
-import { runIdAt } from "./agents.ts";
 import type { RunOutcome } from "./core.ts";
-
-const RUN_DIR = /^run-\d+$/;
+import { manifestPath, RUN_ID, runIdAt, runsRoot } from "./run-layout.ts";
 
 async function runDirs(cwd: string): Promise<string[]> {
-  const root = join(cwd, ".role-fleet");
   let entries: string[];
   try {
-    entries = await readdir(root);
+    entries = await readdir(runsRoot(cwd));
   } catch {
     return [];
   }
-  return entries.filter((name) => RUN_DIR.test(name)).sort((a, b) => runIdAt(b) - runIdAt(a));
+  return entries.filter((name) => RUN_ID.test(name)).sort((a, b) => runIdAt(b) - runIdAt(a));
 }
 
 async function loadManifest(cwd: string, runId: string): Promise<RunManifest> {
-  const path = join(cwd, ".role-fleet", runId, "plan.json");
+  const path = manifestPath(cwd, runId);
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(path, "utf8"));
@@ -50,10 +46,8 @@ function modelLine(outcome: RunOutcome): string {
 function outcomeLine(outcome: RunOutcome): string {
   const bits = [modelLine(outcome)];
   if (outcome.verdict) bits.push(`verdict ${outcome.verdict}`);
-  if (outcome.exitCode !== undefined && outcome.exitCode !== 0) bits.push(`exit ${outcome.exitCode}`);
   if (outcome.aborted) bits.push("aborted");
   if (outcome.error) bits.push(`error: ${outcome.error}`);
-  if (outcome.tokens !== undefined) bits.push(`${outcome.tokens} tokens`);
   if (outcome.durationMs !== undefined) bits.push(`${Math.round(outcome.durationMs / 1000)}s`);
   return bits.join(" · ");
 }
@@ -81,15 +75,12 @@ export async function renderRunReport(cwd: string, runId?: string): Promise<stri
     `Outcomes (${settled.size}/${manifest.agents.length} settled):`,
     ...(outcomes.length
       ? outcomes.map((o) => `  • ${o.agent}: ${outcomeLine(o)}${o.artifact ? ` → ${o.artifact}` : ""}`)
-      : ["  (none recorded — the run may not have dispatched, or the host supplied no task result)"]),
+      : ["  (none recorded — no seat has yielded yet)"]),
   ];
   const missing = manifest.agents.filter((a) => !settled.has(a.agent)).map((a) => a.agent);
   if (missing.length) lines.push(`  ! no outcome: ${missing.join(", ")}`);
-  const tokens = outcomes.reduce((sum, o) => sum + (o.tokens ?? 0), 0);
   const duration = outcomes.reduce((sum, o) => sum + (o.durationMs ?? 0), 0);
-  if (tokens || duration) {
-    lines.push("", `Totals: ${tokens} tokens, ${Math.round(duration / 1000)}s across ${outcomes.length} outcome(s)`);
-  }
+  if (duration) lines.push("", `Total seat time: ${Math.round(duration / 1000)}s across ${outcomes.length} outcome(s)`);
   if (manifest.notes.length) lines.push("", "Notes:", ...manifest.notes.map((n) => `  - ${n}`));
   return lines.join("\n");
 }
@@ -122,9 +113,7 @@ export async function renderRunStatus(cwd: string): Promise<string> {
   const manifest = await loadManifest(cwd, runId);
   const outcomes = Array.isArray(manifest.outcomes) ? manifest.outcomes : [];
   const settled = new Set(outcomes.map((o) => o.agent));
-  const failed = outcomes.filter(
-    (o) => o.aborted || o.error || (o.exitCode !== undefined && o.exitCode !== 0) || o.verdict === "fail",
-  );
+  const failed = outcomes.filter((o) => o.aborted || o.error || o.verdict === "fail");
   const fallbacks = outcomes.filter((o) => o.fallback);
   const missing = manifest.agents.filter((a) => !settled.has(a.agent)).map((a) => a.agent);
   const lines = [

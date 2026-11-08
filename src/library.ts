@@ -7,8 +7,8 @@
  * migration. Deterministic, zero model calls, and each one is still just a
  * RoleSpec — the rest of the pipeline treats it like any other role.
  */
-import type { Effort, RoleSpec } from "./core.ts";
-import { BUILD_TOOLS, grantsWrite, READ_TOOLS, VOCAB, WRITE_TOOLS } from "./core.ts";
+import type { RoleSpec } from "./core.ts";
+import { BUILD_TOOLS, grantsWrite, READ_TOOLS, SEAT_CATALOG, VOCAB, WRITE_TOOLS } from "./core.ts";
 
 export interface Specialist {
   /** Matched against the task text; a specialist joins the plan when it hits.
@@ -25,8 +25,8 @@ export const SPECIALISTS: Specialist[] = [
     match: VOCAB.image,
     spec: {
       id: "designer",
-      title: "Designer",
-      core: "designer",
+      title: SEAT_CATALOG.catalog.designer.title,
+      core: SEAT_CATALOG.catalog.designer.core,
       mission: "Deliver the interface for this task: layout, states, accessibility, and visual polish.",
       acceptance: [
         "Interface renders correctly in the target surface",
@@ -34,12 +34,12 @@ export const SPECIALISTS: Specialist[] = [
         "No unrelated visual regressions",
       ],
       tools: WRITE_TOOLS,
-      effort: "medium" as Effort,
+      effort: SEAT_CATALOG.catalog.designer.effort,
       needsVision: true,
       // `@designer` is not a stock omp model role: it only resolves when the
       // user has a `modelRoles.designer` entry, and otherwise the host falls
       // back to the parent session's model. Documented in the README.
-      model: "@designer",
+      model: SEAT_CATALOG.catalog.designer.alias!,
       dependsOn: ["scout"],
     },
   },
@@ -47,8 +47,8 @@ export const SPECIALISTS: Specialist[] = [
     match: VOCAB.security,
     spec: {
       id: "security-auditor",
-      title: "Security auditor",
-      core: "security",
+      title: SEAT_CATALOG.catalog["security-auditor"].title,
+      core: SEAT_CATALOG.catalog["security-auditor"].core,
       mission:
         "Audit the security of the surface this task touches: untrusted input paths, auth boundaries, secrets handling.",
       acceptance: [
@@ -57,9 +57,9 @@ export const SPECIALISTS: Specialist[] = [
         "No files modified",
       ],
       tools: READ_TOOLS,
-      effort: "high" as Effort,
+      effort: SEAT_CATALOG.catalog["security-auditor"].effort,
       needsVision: false,
-      model: "@slow",
+      model: SEAT_CATALOG.catalog["security-auditor"].alias!,
       dependsOn: [],
     },
   },
@@ -68,8 +68,8 @@ export const SPECIALISTS: Specialist[] = [
     replacesImplementer: true,
     spec: {
       id: "migration-runner",
-      title: "Migration runner",
-      core: "implementer",
+      title: SEAT_CATALOG.catalog["migration-runner"].title,
+      core: SEAT_CATALOG.catalog["migration-runner"].core,
       mission:
         "Run the migration in ordered steps: map usage, migrate, fix fallout, and prove parity with the focused checks.",
       acceptance: [
@@ -80,9 +80,9 @@ export const SPECIALISTS: Specialist[] = [
       // The implementer seat under another id, so it carries the implementer's
       // grant: "focused checks pass on the migrated code" needs a shell.
       tools: BUILD_TOOLS,
-      effort: "high" as Effort,
+      effort: SEAT_CATALOG.catalog["migration-runner"].effort,
       needsVision: false,
-      model: "@task",
+      model: SEAT_CATALOG.catalog["migration-runner"].alias!,
       dependsOn: ["scout"],
     },
   },
@@ -152,7 +152,20 @@ export function applySpecialists(
       notes.push(`${specialist.spec.id}: analysis-only plan; no write seat added`);
       continue;
     }
-    next.push(toRole(specialist, workDir, has));
+    const role = toRole(specialist, workDir, has);
+    next.push(role);
+    // A read-only specialist produces findings, and the reviewer is the seat that
+    // checks findings: it reads this report, so it waits on it. Without the edge
+    // the reviewer runs beside the audit and reviews without it — a wave barrier
+    // used to hide that by holding the reviewer anyway. A council inherits the
+    // reviewer's dependencies, so its members wait on the audit too.
+    if (!grantsWrite(grants)) {
+      next = next.map((r) =>
+        r.id === "reviewer" && !(r.dependsOn ?? []).includes(role.id)
+          ? { ...r, dependsOn: [...(r.dependsOn ?? []), role.id] }
+          : r,
+      );
+    }
     notes.push(`specialist ${specialist.spec.id} added`);
   }
   return next;

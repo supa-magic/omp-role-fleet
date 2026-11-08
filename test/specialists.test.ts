@@ -590,14 +590,12 @@ test("dispatch guidance mentions the council only when one ran", async () => {
   // The paragraph keys off the groups' agent names: use the real emitter.
   const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir, council: 3 });
   const dir2 = await mkdtemp(join(tmpdir(), "rf-guidance2-"));
-  const emitted = await emitAgents(plan, join(dir2, "agents"));
+  const emitted = (await emitAgents(plan, join(dir2, "agents"))).agents;
   const groups = dispatchGroups(emitted);
   assert.match(renderDispatch(groups, dir2), /review council/);
 
-  const plain = await emitAgents(
-    synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir }),
-    join(dir2, "agents2"),
-  );
+  const plain = (await emitAgents(synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir }),
+  join(dir2, "agents2"),)).agents;
   assert.ok(!renderDispatch(dispatchGroups(plain), dir2).includes("review council"));
 });
 
@@ -605,7 +603,7 @@ test("dispatch items carry roster names, effort, and no phantom model field", as
   const dir = await mkdtemp(join(tmpdir(), "rf-names-"));
   const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir, council: 3 });
   const agentsDir = join(dir, "agents");
-  const text = renderDispatch(dispatchGroups(await emitAgents(plan, agentsDir)), agentsDir);
+  const text = renderDispatch(dispatchGroups((await emitAgents(plan, agentsDir)).agents), agentsDir);
 
   assert.match(text, /"name": "Scout Smol"/);
   assert.match(text, /"name": "Implementer Task"/);

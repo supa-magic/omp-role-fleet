@@ -1,8 +1,8 @@
 name: Publish to npm
 
 # Same shape as supa-magic/spm: a GitHub Release triggers publish.
-# Version lives in package.json (+ PLUGIN_VERSION in src/index.ts); bump those
-# on main, tag vX.Y.Z, publish the release — CI owns npm auth via NPM_TOKEN.
+# Version lives in package.json (the banner reads it at load); bump it and the
+# lockfile on main, tag vX.Y.Z, publish the release — CI owns npm auth via NPM_TOKEN.
 on:
   release:
     types: [published]
@@ -38,16 +38,6 @@ jobs:
               exit 1
               ;;
           esac
-
-      - name: Check PLUGIN_VERSION matches package.json
-        run: |
-          set -euo pipefail
-          VER="$(node -p "require('./package.json').version")"
-          PIN="$(node -p "const s=require('fs').readFileSync('src/index.ts','utf8'); const m=/PLUGIN_VERSION = \"([^\"]+)\"/.exec(s); if(!m) process.exit(2); m[1]")"
-          test "$PIN" = "$VER" || {
-            echo "::error::PLUGIN_VERSION ($PIN) != package.json ($VER)"
-            exit 1
-          }
 
       - run: npm ci
       # prepublishOnly already runs test + typecheck; invoke explicitly so a

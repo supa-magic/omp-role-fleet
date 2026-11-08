@@ -22,25 +22,141 @@ import { join } from "node:path";
 /** What a seat is for, keyed by the words the synthesis heuristics match on. */
 export type Capability = "scout" | "plan" | "code" | "test" | "review" | "docs";
 
-/**
- * The seat id each capability mints.
- *
- * In `core` because two modules need it and neither owns it: `synthesizePlan`
- * drafts its seats from it, and the proposal sandbox (`generate.parseProposal`)
- * must refuse exactly these ids. A hand-synced copy there is correct only until
- * this map changes, and the failure is silent — a proposal that claims
- * `designer` is refused rather than merged.
- */
-export const CAPABILITY_ID: Record<Capability, string> = {
-  scout: "scout",
-  plan: "planner",
-  code: "implementer",
-  test: "tester",
-  review: "reviewer",
-  docs: "docs-updater",
-};
-
 export type Effort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto";
+
+/**
+ * The seat catalog: every static fact about every seat the plugin can mint.
+ *
+ * One table because these facts used to live in five places — the id map, the
+ * alias map, the effort map, the drop order and the seat title written out
+ * inside the draft builder — and a seat changed in one of them only. The
+ * proposal sandbox refuses the ids from here, the synthesis pass drafts its
+ * seats from here, the specialist catalog fills its specs from here, and the
+ * picker and the confirmation screen read the purposes from here.
+ */
+export interface SeatFacts {
+  /** The fleet seat this one executes as (allowlist-mode routing). */
+  core: string;
+  /** The omp model-role alias the seat rides; absent when the caller names the model. */
+  alias?: string;
+  /** The seat's thinking effort. */
+  effort: Effort;
+  /** One line per seat, in the words a person uses. */
+  purpose: string;
+  /** The seat's title in the cast. */
+  title: string;
+}
+
+/** A base-cast seat: the capability that drafts it, and its drop order. */
+export interface CapabilitySeat extends SeatFacts {
+  /** The capability that drafts this seat. */
+  capability: Capability;
+  /** Drop order when the cap bites; lower survives. */
+  keepPriority: number;
+  /** The seat id this capability mints. */
+  id: string;
+  /** The base cast always rides an alias. */
+  alias: string;
+}
+
+export const SEAT_CATALOG: {
+  base: Record<Capability, CapabilitySeat>;
+  catalog: Record<string, SeatFacts>;
+} = {
+  /** The base cast: one row per capability, keyed by the capability. */
+  base: {
+    scout: {
+      id: "scout",
+      capability: "scout",
+      core: "scout",
+      alias: "@smol",
+      effort: "low",
+      keepPriority: 1,
+      purpose: "maps where the task touches, with file:line evidence",
+      title: "Investigator",
+    },
+    plan: {
+      id: "planner",
+      capability: "plan",
+      core: "planner",
+      alias: "@plan",
+      effort: "high",
+      keepPriority: 3,
+      purpose: "turns the investigation into a locked implementation plan",
+      title: "Planner",
+    },
+    code: {
+      id: "implementer",
+      capability: "code",
+      core: "implementer",
+      alias: "@task",
+      effort: "medium",
+      keepPriority: 0,
+      purpose: "implements the plan with the smallest correct change",
+      title: "Implementer",
+    },
+    test: {
+      id: "tester",
+      capability: "test",
+      core: "tester",
+      alias: "@smol",
+      effort: "medium",
+      keepPriority: 4,
+      purpose: "runs the focused checks and reports their real output",
+      title: "Tester",
+    },
+    review: {
+      id: "reviewer",
+      capability: "review",
+      core: "reviewer",
+      alias: "@slow",
+      effort: "high",
+      keepPriority: 2,
+      purpose: "reviews the change for correctness, scope, and evidence",
+      title: "Reviewer",
+    },
+    docs: {
+      id: "docs-updater",
+      capability: "docs",
+      core: "docs-updater",
+      alias: "@smol",
+      effort: "low",
+      keepPriority: 5,
+      purpose: "keeps user-facing documentation true to shipped behavior",
+      title: "Docs updater",
+    },
+  },
+  /** The hand-written catalog seats, keyed by seat id. */
+  catalog: {
+    designer: {
+      core: "designer",
+      alias: "@designer",
+      effort: "medium",
+      purpose: "builds and polishes the interface, accessibility included",
+      title: "Designer",
+    },
+    "security-auditor": {
+      core: "security",
+      alias: "@slow",
+      effort: "high",
+      purpose: "audits the surface for vulnerabilities, with evidence",
+      title: "Security auditor",
+    },
+    "migration-runner": {
+      core: "implementer",
+      alias: "@task",
+      effort: "high",
+      purpose: "runs a dependency or framework migration in ordered, verifiable steps",
+      title: "Migration runner",
+    },
+    consul: {
+      core: "consul",
+      effort: "high",
+      purpose: "reconciles the council's reports into one verdict",
+      title: "Consul",
+    },
+  },
+};
 
 /**
  * Tool grants. One definition each, here: the static cast, the specialist
@@ -145,9 +261,14 @@ export const VOCAB = {
   /** Names code as the subject without asking to change it. */
   codeNoun:
     /\b(code|bug\w*|api|module\w*|function\w*|crate|rust|typescript|javascript|python|schema\w*|endpoint\w*|service\w*|middleware|packag\w*|deps?|dependenc\w*|librar\w*|repo\w*|codebase|script\w*|parser\w*|cli|sdk|database|quer\w*|sql|css|html|frontend|backend|server\w*|client\w*)\b/i,
-  /** Broad-scope work: earns a planner. */
+  /**
+   * Broad-scope work: earns a planner, one more serial wave. Breadth words only:
+   * a bare "refactor the auth module" is one module, and the implementer locks
+   * its own steps from the scout's map. Migrations stay — they are ordered by
+   * nature.
+   */
   multiFile:
-    /\b(refactor\w*|migrat\w*|across|several files|multi-file|whole repo|entire repo|all files|every file|suite|codemod\w*)\b/i,
+    /\b(migrat\w*|across|several files|many files|multiple files|multi-file|whole repo|entire repo|repo-wide|codebase-wide|all files|every file|suite|codemod\w*)\b/i,
   /** UI and visual work: a vision seat, and the designer seat. */
   image:
     /\b(screenshot\w*|image\w*|ui|ux|design\w*|visual\w*|layout\w*|render\w*|mockup\w*|wireframe\w*|frontend page|web page|landing page|css|stylesheet\w*|theme|dark mode)\b/i,
@@ -257,16 +378,18 @@ export function isSliceSeat(id: string): boolean {
  * the dispatch table — and three copies of the same sentence would drift.
  */
 export const SEAT_PURPOSE: Record<string, string> = {
-  scout: "maps where the task touches, with file:line evidence",
-  planner: "turns the investigation into a locked implementation plan",
-  implementer: "implements the plan with the smallest correct change",
-  tester: "runs the focused checks and reports their real output",
-  reviewer: "reviews the change for correctness, scope, and evidence",
-  consul: "reconciles the council's reports into one verdict",
-  "docs-updater": "keeps user-facing documentation true to shipped behavior",
-  designer: "builds and polishes the interface, accessibility included",
-  "security-auditor": "audits the surface for vulnerabilities, with evidence",
-  "migration-runner": "runs a dependency or framework migration in ordered, verifiable steps",
+  scout: SEAT_CATALOG.base.scout.purpose,
+  planner: SEAT_CATALOG.base.plan.purpose,
+  implementer: SEAT_CATALOG.base.code.purpose,
+  tester: SEAT_CATALOG.base.test.purpose,
+  reviewer: SEAT_CATALOG.base.review.purpose,
+  consul: SEAT_CATALOG.catalog.consul.purpose,
+  "docs-updater": SEAT_CATALOG.base.docs.purpose,
+  designer: SEAT_CATALOG.catalog.designer.purpose,
+  "security-auditor": SEAT_CATALOG.catalog["security-auditor"].purpose,
+  "migration-runner": SEAT_CATALOG.catalog["migration-runner"].purpose,
+  // A seat the dynamic tier may propose: the catalog holds no row for it, so
+  // its purpose is written out here.
   "db-migration-auditor": "reviews the schema change and its rollback path",
 };
 
@@ -337,22 +460,19 @@ export interface RolePlan {
   analysisOnly?: boolean;
 }
 
-/** What one settled seat did, as the host reported it. Written into the run
- *  manifest after dispatch; absent fields mean the host did not supply them. */
+/** What one settled seat did, recorded from its own session when it yielded.
+ *  Written into the run manifest; absent fields mean nothing was observed. */
 export interface RunOutcome {
   agent: string;
-  /** Model the plan pinned, when the plan-time baseline is still known. */
+  /** Model the plan expected, when the plan-time baseline is known. */
   planned?: string;
-  /** Concrete model the host reports for the settled run. */
+  /** Concrete model the seat's session was running when it yielded. */
   ran?: string;
   fallback: boolean;
+  /** How the seat reached `ran` when it was not the plan: the retry fallback. */
   route?: string;
-  exitCode?: number;
   error?: string;
   aborted?: boolean;
-  retryFailure?: unknown;
-  tokens?: number;
-  requests?: number;
   durationMs?: number;
   /** The seat's own `verdict` field, when it yielded the declared schema. */
   verdict?: string;
@@ -368,33 +488,6 @@ export interface GateVerdict {
   verdict: Verdict;
   reason: string;
   issues: string[];
-}
-
-/**
- * Role → omp model-role alias.
- *
- * The mapping mirrors what each kind of work needs, not which vendor is cheap:
- * recon wants fast and inexpensive (`@smol`), implementation takes the general
- * subagent role (`@task`) — the planner already did the heavy thinking, and an
- * executor of a locked plan does not need a premium seat — while review and
- * security want the strongest reasoning (`@slow`). The tester runs focused
- * checks and reports real output, which is mechanical, so it rides `@smol`;
- * diagnosing a failure it finds is the implementer's job, not its own.
- * Users retarget a whole class of work by moving one alias in `/model` — no
- * plugin configuration involved.
- */
-export const ROLE_ALIAS: Record<string, string> = {
-  scout: "@smol",
-  planner: "@plan",
-  implementer: "@task",
-  tester: "@smol",
-  reviewer: "@slow",
-  security: "@slow",
-  "docs-updater": "@smol",
-};
-
-export function aliasFor(core: string): string {
-  return ROLE_ALIAS[core] ?? "@task";
 }
 
 /** Coarse task-tool effort. Host precedence: caller `effort` > model `:suffix` > agent `thinking-level`. */
@@ -510,7 +603,7 @@ export function baseModel(value: string): string {
   return THINKING_LEVELS.includes(value.slice(colon + 1)) ? value.slice(0, colon) : value;
 }
 
-export function normalizeSeat(value: string): string {
+function normalizeSeat(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 

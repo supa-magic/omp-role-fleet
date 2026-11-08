@@ -1,6 +1,6 @@
 # omp-role-fleet
 
-One task in → a team of specialised agents out. The plugin picks roles, assigns models, runs them in dependency waves, and hands results back to the main model.
+One task in → a team of specialised agents out. The plugin picks roles, assigns models, starts each one as soon as the roles it depends on have reported, and hands results back to the main model.
 
 ```
 you:    refactor the auth module and review it
@@ -98,28 +98,34 @@ When an **agent** drives the fleet (`role_fleet_plan` tool, or `/role-fleet --ye
 
 By default seats use `@` aliases (`@smol`, `@plan`, `@task`, `@slow`, …) from your `/model` → `modelRoles`.
 
-After a run settles, the plugin reports what **actually** ran (including fallbacks):
+Each seat records what **actually** ran (including retry fallbacks) from its own session when it yields; the main session shows a divergence as it happens:
 
 ```text
-role-fleet: rf-reviewer-c1 — planned `@slow`, ran `zai/glm-5` — FALLBACK
+role-fleet: rf-reviewer-c1 — planned `anthropic/claude-opus-4-6`, ran `zai/glm-5`, FALLBACK
 ```
 
-`/role-fleet report` and `.role-fleet/run-*/plan.json` keep the same record.
+`/role-fleet report` and `.role-fleet/run-*/plan.json` keep the same record (model, fallback, verdict, seat time).
 
 ---
 
 ## Reports
 
-Every seat yields a structured result: full **`report`**, short **`summary`**, **`verdict`**. The council and consul must read `report`, not `summary`. Read-only seats cannot write files — the orchestrator (or the plugin ledger) places their report on the artifact path before the next wave.
+Every seat yields a structured result (`structured: true` is set in each generated definition, so this holds even with the host's `task.structured` off): full **`report`**, short **`summary`**, **`verdict`**. The council and consul must read `report`, not `summary`. Read-only seats cannot write files — the plugin writes each one's full report to its artifact path when the seat yields, so the main model does not copy reports between waves.
+
+## Speed
+
+- The plugin registers no `tool_call`/`tool_result` hook in your main session: the host turns off speculative task launch wherever an extension holds one. The read-only MCP guard is installed only inside read-only `rf-*` seat sessions.
+- Planning (cast, gate, emit) takes a few milliseconds; a run's wall clock is its critical path of seats. Each seat starts as soon as the seats it depends on have reported — never held behind an unrelated slow seat. A planner is added only for breadth wording (`across`, `several files`, `migrate`, `codemod`, …), and the single reviewer that gates a change runs at medium effort (council, consul, review-only and security asks stay high).
+- Per-seat `effort` reaches the host only with `task.enableEffort` on.
 
 ---
 
 ## Council & slices
 
 - **Council** (`--council` / `--models` / task wording): several independent reviewers. Optional **`--consul MODEL`** reconciles them.
-- **`--slices N`**: N writer seats in one parallel wave; tester/reviewer wait on all of them. Give each writer its own files from the scout map.
+- **`--slices N`**: N writer seats that start together; tester/reviewer wait on all of them. Give each writer its own files from the scout map.
 
-Waves run as parallel `task` batches. Results auto-deliver — do not poll `wait` between waves (call `wait` only when fully blocked). Next wave starts after every seat of the previous wave has reported.
+Seats are dispatched as `task` batches: those with no dependencies at once, then each one as soon as every seat it depends on has reported (seats ready at the same moment go together). Results auto-deliver — do not poll `wait` (call it only when fully blocked).
 
 ---
 
@@ -170,7 +176,7 @@ npm test
 npm run typecheck
 ```
 
-Publish: bump `package.json`, `package-lock.json`, and `PLUGIN_VERSION` in `src/index.ts` together → GitHub Release `vX.Y.Z` → workflow publishes to npm (`NPM_TOKEN`).
+Publish: bump `package.json` and `package-lock.json` together (`npm version X.Y.Z --no-git-tag-version`; the banner reads the version from `package.json`) → GitHub Release `vX.Y.Z` → workflow publishes to npm (`NPM_TOKEN`).
 
 ---
 

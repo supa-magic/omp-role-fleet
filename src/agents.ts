@@ -15,22 +15,9 @@ import { lstat, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/
 import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec, RunOutcome, TaskEffort } from "./core.ts";
 import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves, taskEffort } from "./core.ts";
-import { isReadOnlyToolset, mcpAllowlistFromEnv, recordSeatToolset } from "./mcp-policy.ts";
-
-/**
- * Ordering for run ids, in one place.
- *
- * Both prune guards — "is this agent file owned by a newer run?" and "which run
- * directories are stale?" — reason about the same ids and must agree, because
- * they implement one invariant. Comparing them as strings made the agent guard
- * disagree with the directory guard across a digit-count boundary (`run-999` vs
- * `run-1000`): the newer run sorted *older*, and the older run's prune deleted
- * the newer run's live agent files. Numeric, like the directory side, and like
- * the comment there already said ordering has to be.
- */
-export function runIdAt(runId: string): number {
-  return Number(/^run-(\d+)$/.exec(runId)?.[1] ?? Number.NaN);
-}
+import { isReadOnlyToolset, mcpAllowlistFromEnv } from "./mcp-policy.ts";
+import { MANIFEST_FILE, RUN_ID, runIdAt } from "./run-layout.ts";
+import { GENERATED_MARKER, RUN_MARKER } from "./seats.ts";
 
 /** How recent a foreign run must be for its files to plausibly still be in use.
  *  Sequential runs reuse seat names by design; warning on every stale file from
@@ -43,14 +30,6 @@ function recentlyActive(owner: string | undefined, currentRunId: string | undefi
   const currentAt = runIdAt(currentRunId);
   return Number.isFinite(ownerAt) && Number.isFinite(currentAt) && currentAt >= ownerAt && currentAt - ownerAt <= IN_FLIGHT_WINDOW_MS;
 }
-
-/** Marks a file as plugin-generated so stale runs can be pruned safely. */
-const GENERATED_MARKER = "<!-- role-fleet:generated -->";
-
-/** Which run wrote this file: `run-<epoch ms>`, so runs order lexicographically.
- *  Ids are strictly increasing (see `nextRunId`), which is what lets the prune
- *  guard tell "stale, finished run" from "newer run still in flight". */
-const RUN_MARKER = /<!-- role-fleet:run (run-\d+) -->/;
 
 function runStamp(runId: string | undefined): string {
   return `<!-- role-fleet:run ${runId ?? "run-0"} -->`;
@@ -125,8 +104,8 @@ function grantNote(tools: string[]): string {
  * There is deliberately no "which model did you run on" field. The subagent
  * prompt carries no model name, so the only thing a seat could fill it with is
  * the brief's pinned selector — which a fallback invalidates exactly when it
- * matters. The real answer is host-side (`model-observed.ts`) and is recorded
- * from the settled result rather than asked for.
+ * matters. The real answer is the seat session's live model at its yield,
+ * which the plugin records (`ledger.ts`) rather than asks for.
  * Every field carries a `description` and every field is listed in `required`,
  * because the two formats the host accepts read the same YAML differently. A
  * root with `properties` and no `type` parses as JTD, whose `properties` are
@@ -203,9 +182,11 @@ function frontmatter(role: RoleSpec, name: string): string {
     `tools: [${role.tools.map(yamlString).join(", ")}]`,
     `model: ${yamlString(role.model)}`,
     `thinking-level: ${yamlString(role.effort)}`,
-    // Without this the seat has no `yield` tool and its last assistant turn is
-    // the whole result: a paragraph, trimmed by the parent's own budget, which
-    // is the summary-only failure this schema exists to remove.
+    // Without `structured: true` the seat has no `yield` tool on a host with
+    // `task.structured` off (the default): the schema below is ignored and the
+    // last assistant turn becomes the whole result — the summary-only failure
+    // this schema exists to remove, and the ledger has no report to place.
+    "structured: true",
     REPORT_SCHEMA_YAML,
     // `advisor: true` asks the host for its default advisor-role model. The
     // string spelling ("@advisor") is a model pattern instead, and a
@@ -213,23 +194,14 @@ function frontmatter(role: RoleSpec, name: string): string {
     // to the built-in priority list. Vision itself is not a frontmatter key —
     // a vision seat is a seat whose model alias resolves to a vision model.
     //
-    // Who earns it: the seats where being wrong is expensive and the work is
-    // not already cross-checked. The planner decides the shape every later wave
-    // follows, and a wrong plan poisons all of them; the implementer is the
-    // longest-running seat and the one that declares the work done. Keyed on
-    // `core`, so `migration-runner` and a proposed writer — the implementer seat
-    // under other ids — are covered by the same rule. Review seats are excluded
-    // on purpose: their value is independence *from* the cast, and a second
-    // model reviewing the reviewer's own turns buys agreement, not a second
-    // opinion. The grant is real but not free — the host pairs the seat's own
-    // session with the advisor model, which passively reviews each of its turns,
-    // so the cost scales with how long the seat runs and with whatever model the
-    // `advisor` role points at. It is also inert without one: subagents default
-    // to no advisor, this frontmatter is the opt-in, and the host's
-    // `task.agentAdvisor` setting overrides it per seat (`{"rf-planner": "off"}`).
-    ...(role.needsVision || role.core === "planner" || role.core === "implementer"
-      ? ["advisor: true"]
-      : []),
+    // Who earns it: the planner, whose plan every later wave follows — a wrong
+    // plan poisons all of them — and vision seats. Not the implementer: it is
+    // the longest-running seat on the critical path, and an advisor pass on
+    // every one of its turns paces the whole run, while the tester and
+    // reviewers already cross-check its work. Review seats are excluded on
+    // purpose: their value is independence *from* the cast. The host's
+    // `task.agentAdvisor` setting overrides this per seat.
+    ...(role.needsVision || role.core === "planner" ? ["advisor: true"] : []),
     "---",
     "",
   ].join("\n");
@@ -285,13 +257,10 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
       const dep = plan.roles.find((r) => r.id === d);
       if (!dep) return null;
       // A read-only dep cannot write its own artifact, but the path is still where
-      // the report belongs: the agent returns it and the orchestrator places it
-      // there. Saying "its final message" instead would name a channel the
-      // downstream agent cannot read — it has no link to any other agent. A
-      // writable dep writes the file itself and needs no such note.
-      return dep.tools.some((t) => t === "write" || t === "edit" || t === "bash")
+      // the report belongs: the plugin places it there when the seat yields.
+      return grantsWrite(dep.tools)
         ? `- \`${dep.id}\` → ${dep.artifact}`
-        : `- \`${dep.id}\` → ${dep.artifact} (read-only role — it returns the report, the orchestrator writes it here)`;
+        : `- \`${dep.id}\` → ${dep.artifact} (read-only role — the plugin writes its report here)`;
     })
     .filter(Boolean)
     .join("\n");
@@ -356,7 +325,7 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
     ...(grantsWrite(role.tools)
       ? [`- Write your report to \`${role.artifact}\` as well as yielding it: the full report, not a summary.`]
       : [
-          `- You have no write access. Yield your full report — it belongs at \`${role.artifact}\`, and the orchestrator writes it there.`,
+          `- You have no write access. Yield your full report — the plugin writes it to \`${role.artifact}\`.`,
         ]),
     "",
   ].join("\n");
@@ -379,12 +348,14 @@ export interface EmittedAgent {
   effort: TaskEffort;
   artifact: string;
   dependsOn: string[];
+  /** The built-in grant the definition pins; the MCP guard judges against it. */
+  tools: string[];
   /**
    * Whether the seat can write its own artifact.
    *
-   * False means nobody but the orchestrator places that file, which is a fact
-   * the dispatch prompt has to carry: the seat's own brief promises the path and
-   * cannot keep the promise.
+   * False means the plugin places that file when the seat yields, and the
+   * dispatch prompt names it so the main model can fill a gap if the seat
+   * failed to yield.
    */
   writesOwnReport: boolean;
 }
@@ -472,9 +443,6 @@ export async function pruneGeneratedAgents(
   return removed;
 }
 
-/** A run directory this plugin created: `run-<epoch ms>`, nothing else. */
-const RUN_DIR = /^run-(\d+)$/;
-
 /**
  * Keep the per-run artifact tree bounded: delete all but the newest `keep`
  * run directories under `root`.
@@ -499,7 +467,7 @@ export async function pruneRunDirs(root: string, currentRunId: string, keep: num
   }
   const currentAt = runIdAt(currentRunId);
   const runs = entries
-    .filter((e) => e.isDirectory() && RUN_DIR.test(e.name))
+    .filter((e) => e.isDirectory() && RUN_ID.test(e.name))
     .map((e) => ({ name: e.name, at: runIdAt(e.name) }))
     // Numeric, not lexical: ordering must not depend on the epoch's digit count.
     // Same comparator the agent-file guard uses, so the two halves of the
@@ -528,6 +496,168 @@ export async function pruneRunDirs(root: string, currentRunId: string, keep: num
   return removed;
 }
 
+/** One file in the agents directory, as the name resolver sees it. */
+export interface SeatFileState {
+  /** The file's body, when it could be read. */
+  body?: string;
+  /** Whether the path is a symlink; a link is never written through. */
+  isLink: boolean;
+}
+
+/** The agent names a plan's seats got, and what the resolver left alone. */
+export interface SeatNameResolution {
+  /** The name each seat dispatches under, in the order the seats were given. */
+  names: string[];
+  /** Notes about the files this run did not take over. */
+  notes: string[];
+  /** The seat file that has no free name beside it, when it has none. */
+  conflict?: string;
+}
+
+/**
+ * The agent name each seat gets, given the files already in the directory.
+ *
+ * Pure: it decides from the directory state it is handed and never touches the
+ * disk. A seat takes its plain `rf-<id>.md` name unless that file belongs to
+ * somebody else — a hand-written agent, a hand-copied rename of a generated
+ * one, or a run that is still in flight — and then takes the first `-2`, `-3`,
+ * … name that is free or that this run owns, so the user's file survives and
+ * the seat still dispatches.
+ *
+ * `seats` is the order the seats are decided in; the caller passes them in
+ * dispatch order, and the names and notes come out in that order too.
+ */
+export function resolveSeatNames(
+  plan: RolePlan,
+  existing: Map<string, SeatFileState>,
+  seats: readonly RoleSpec[] = planWaves(plan.roles).flat(),
+): SeatNameResolution {
+  const names: string[] = [];
+  const notes: string[] = [];
+  // Every seat's own base name is reserved before any suffix is handed out. A
+  // proposed role whose literal id is `x-2` and a renamed seat looking for a
+  // free `rf-x-2.md` would otherwise resolve to the same file, and the last
+  // writer would silently run the other seat's brief.
+  const reserved = new Set(seats.map((r) => `${AGENT_PREFIX}${r.id}.md`));
+  // Names this run has already claimed, so a later seat does not take one.
+  const claimed = new Set<string>();
+  const replacedForeign: string[] = [];
+  const kept: Array<{ file: string; as: string; why: string }> = [];
+
+  for (const role of seats) {
+    const base = `${AGENT_PREFIX}${role.id}`;
+    const baseFile = `${base}.md`;
+    const state = existing.get(baseFile);
+    if (!state) {
+      names.push(base);
+      continue;
+    }
+    const baseBody = state.body;
+    // An unreadable file is left alone too — `undefined` falls through to the
+    // suffix search rather than being treated as this run's to overwrite. A
+    // symlink is never written through: the target is outside what this plugin
+    // created, and `pruneGeneratedAgents` already removes the link, not the target.
+    if (baseBody !== undefined && !state.isLink && oursToReplace(baseBody, baseFile, plan.runId)) {
+      const owner = baseBody.match(RUN_MARKER)?.[1];
+      if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
+        replacedForeign.push(`${baseFile} (${owner})`);
+      }
+      names.push(base);
+      continue;
+    }
+    // Take the first suffix that is free *or ours to replace*. Stopping at the
+    // first free one instead would climb a new name on every run for as long as
+    // the hand-written file sits there, leaving a trail of near-duplicate seats.
+    let as: string | undefined;
+    for (let n = 2; n < 100 && as === undefined; n++) {
+      const candidate = `${base}-${n}.md`;
+      if (reserved.has(candidate)) continue;
+      const candidateState = existing.get(candidate);
+      if (!candidateState && !claimed.has(candidate)) {
+        as = `${base}-${n}`;
+        break;
+      }
+      if (candidateState?.isLink) continue;
+      const body = candidateState?.body;
+      if (body === undefined || !oursToReplace(body, candidate, plan.runId)) continue;
+      const owner = body.match(RUN_MARKER)?.[1];
+      if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
+        replacedForeign.push(`${candidate} (${owner})`);
+      }
+      as = `${base}-${n}`;
+    }
+    if (as === undefined) {
+      return { names, notes: [], conflict: baseFile };
+    }
+    const owner = baseBody?.match(RUN_MARKER)?.[1];
+    kept.push({ file: baseFile, as, why: owner ? `owned by ${owner}` : "hand-written" });
+    claimed.add(`${as}.md`);
+    names.push(as);
+  }
+
+  const handWritten = kept.filter((k) => k.why === "hand-written");
+  if (handWritten.length) {
+    notes.push(
+      `kept hand-written agent file(s), seats run under a new name: ${handWritten
+        .map((k) => `${k.file} → ${k.as}.md`)
+        .join(", ")}`,
+    );
+  }
+  if (replacedForeign.length) {
+    notes.push(
+      `replaced agent file(s) from another run (${replacedForeign.join(", ")}); concurrent role-fleet runs in one working tree are not supported — use a worktree`,
+    );
+  }
+  const foreign = kept.filter((k) => k.why !== "hand-written");
+  if (foreign.length) {
+    notes.push(
+      `kept agent file(s) belonging to another run (${foreign
+        .map((k) => `${k.file} ${k.why}`)
+        .join(", ")}); concurrent role-fleet runs in one working tree are not supported — use a worktree`,
+    );
+  }
+
+  return { names, notes };
+}
+
+/**
+ * Read the directory state the name resolver needs: which files exist, what
+ * their bodies say, and which of them are symlinks.
+ *
+ * One `readdir` and one concurrent pass over the bodies that matter, instead of
+ * a round trip per seat.
+ */
+async function readSeatFiles(dir: string, seats: readonly RoleSpec[]): Promise<Map<string, SeatFileState>> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return new Map();
+  }
+  const present = new Set(entries);
+  const wanted = new Set<string>();
+  for (const role of seats) {
+    const base = `${AGENT_PREFIX}${role.id}`;
+    if (present.has(`${base}.md`)) wanted.add(`${base}.md`);
+    for (let n = 2; n < 100; n++) {
+      const candidate = `${base}-${n}.md`;
+      if (present.has(candidate)) wanted.add(candidate);
+    }
+  }
+  const states = new Map<string, SeatFileState>();
+  await Promise.all(
+    [...wanted].map(async (file) => {
+      const path = join(dir, file);
+      const [body, isLink] = await Promise.all([
+        readFile(path, "utf8").catch(() => undefined),
+        lstat(path).then((s) => s.isSymbolicLink()).catch(() => false),
+      ]);
+      states.set(file, { body, isLink });
+    }),
+  );
+  return states;
+}
+
 /**
  * Write one agent file per role, flat in `dir`.
  *
@@ -537,31 +667,46 @@ export async function pruneRunDirs(root: string, currentRunId: string, keep: num
  * file owned by a newer run, both move this run's seat to the next free `-N`
  * name, so the user's content survives and the seat still dispatches. Names are
  * resolved for the whole cast before the first write, so a name that cannot be
- * resolved leaves nothing on disk. Anything left alone is appended to
- * `plan.notes` — a plan that silently ran a seat under a different name than the
- * one it printed would be the same failure the notes exist to prevent.
+ * resolved leaves nothing on disk.
+ *
+ * The plan is not touched: the notes about the files this run left alone come
+ * back with the seats, for the caller to record — a plan that silently ran a
+ * seat under a different name than the one it printed would be the same failure
+ * the notes exist to prevent.
  */
-export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAgent[]> {
+export async function emitAgents(
+  plan: RolePlan,
+  dir: string,
+): Promise<{ agents: EmittedAgent[]; notes: string[] }> {
   // Validate the whole cast before the first write: a bad id must leave nothing
   // on disk, and the name is the one frontmatter scalar that is not quoted.
   for (const role of plan.roles) assertAgentName(`${AGENT_PREFIX}${role.id}`);
   await mkdir(dir, { recursive: true });
   // The plan's artifacts live under the run directory; create every parent up
   // front so a worker never inherits a missing one and an orchestrator reading
-  // the plan does not chase a path that does not exist yet. Taking only the
-  // first role's parent held while every artifact shared `workDir`, and would
-  // quietly miss any plan that gave a seat its own directory.
+  // the plan does not chase a path that does not exist yet.
   const artifactParents = [...new Set(plan.roles.map((r) => dirname(r.artifact)))];
   await Promise.all(artifactParents.map((parent) => mkdir(parent, { recursive: true })));
   const waves = planWaves(plan.roles);
-  const emitted: EmittedAgent[] = [];
+  const seats = waves.flat();
 
+  const existing = await readSeatFiles(dir, seats);
+  const resolution = resolveSeatNames(plan, existing, seats);
+  if (resolution.conflict) {
+    throw new Error(
+      `${resolution.conflict} is not this run's to replace, and ${dir} holds a hundred names based on it — move them out of the way and re-run`,
+    );
+  }
+
+  const emitted: EmittedAgent[] = [];
+  let seat = 0;
   waves.forEach((wave, i) => {
     for (const role of wave) {
+      const agent = resolution.names[seat++];
       emitted.push({
-        agent: `${AGENT_PREFIX}${role.id}`,
+        agent,
         role: role.id,
-        path: join(dir, `${AGENT_PREFIX}${role.id}.md`),
+        path: join(dir, `${agent}.md`),
         wave: i + 1,
         model: role.model,
         ...(role.modelResolved ? { modelResolved: role.modelResolved } : {}),
@@ -569,90 +714,12 @@ export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAg
         artifact: role.artifact,
         dependsOn: [...(role.dependsOn ?? [])],
         writesOwnReport: grantsWrite(role.tools),
+        tools: [...role.tools],
       });
     }
   });
 
-  // Resolution pass: read the targets once, and decide for every seat whether
-  // the name it wants is this run's to take.
-  const entries = new Set(await readdir(dir).catch((): string[] => []));
-  // Every seat's own base name is reserved before any suffix is handed out. A
-  // proposed role whose literal id is `x-2` and a renamed seat looking for a
-  // free `rf-x-2.md` would otherwise resolve to the same file, and the last
-  // writer would silently run the other seat's brief.
-  const reserved = new Set(emitted.map((a) => `${a.agent}.md`));
-  const replacedForeign: string[] = [];
-  const isLink = async (file: string): Promise<boolean> =>
-    lstat(join(dir, file)).then((s) => s.isSymbolicLink()).catch(() => false);
-  const kept: Array<{ file: string; as: string; why: string }> = [];
-  for (const a of emitted) {
-    const base = `${a.agent}.md`;
-    if (!entries.has(base)) continue;
-    const baseBody = await readFile(join(dir, base), "utf8").catch(() => undefined);
-    // An unreadable file is left alone too — `undefined` falls through to the
-    // suffix search rather than being treated as this run's to overwrite. A
-    // symlink is never written through: the target is outside what this plugin
-    // created, and `pruneGeneratedAgents` already removes the link, not the target.
-    if (baseBody !== undefined && !(await isLink(base)) && oursToReplace(baseBody, base, plan.runId)) {
-      const owner = baseBody.match(RUN_MARKER)?.[1];
-      if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
-        replacedForeign.push(`${base} (${owner})`);
-      }
-      continue;
-    }
-    // Take the first suffix that is free *or ours to replace*. Stopping at the
-    // first free one instead would climb a new name on every run for as long as
-    // the hand-written file sits there, leaving a trail of near-duplicate seats.
-    let as: string | undefined;
-    for (let n = 2; n < 100 && as === undefined; n++) {
-      const candidate = `${a.agent}-${n}.md`;
-      if (reserved.has(candidate)) continue;
-      if (!entries.has(candidate)) {
-        as = `${a.agent}-${n}`;
-        break;
-      }
-      if (await isLink(candidate)) continue;
-      const body = await readFile(join(dir, candidate), "utf8").catch(() => undefined);
-      if (body !== undefined && oursToReplace(body, candidate, plan.runId)) {
-        const owner = body.match(RUN_MARKER)?.[1];
-        if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
-          replacedForeign.push(`${candidate} (${owner})`);
-        }
-        as = `${a.agent}-${n}`;
-      }
-    }
-    if (as === undefined) {
-      throw new Error(
-        `${base} is not this run's to replace, and ${dir} holds a hundred names based on it — move them out of the way and re-run`,
-      );
-    }
-    const owner = baseBody?.match(RUN_MARKER)?.[1];
-    kept.push({ file: base, as, why: owner ? `owned by ${owner}` : "hand-written" });
-    entries.add(`${as}.md`);
-    a.agent = as;
-    a.path = join(dir, `${as}.md`);
-  }
-  const handWritten = kept.filter((k) => k.why === "hand-written");
-  if (handWritten.length) {
-    plan.notes.push(
-      `kept hand-written agent file(s), seats run under a new name: ${handWritten
-        .map((k) => `${k.file} → ${k.as}.md`)
-        .join(", ")}`,
-    );
-  }
-  if (replacedForeign.length) {
-    plan.notes.push(
-      `replaced agent file(s) from another run (${replacedForeign.join(", ")}); concurrent role-fleet runs in one working tree are not supported — use a worktree`,
-    );
-  }
-  const foreign = kept.filter((k) => k.why !== "hand-written");
-  if (foreign.length) {
-    plan.notes.push(
-      `kept agent file(s) belonging to another run (${foreign
-        .map((k) => `${k.file} ${k.why}`)
-        .join(", ")}); concurrent role-fleet runs in one working tree are not supported — use a worktree`,
-    );
-  }
+  const notes = [...resolution.notes];
 
   await Promise.all(
     emitted.map(async (a) => {
@@ -661,29 +728,19 @@ export async function emitAgents(plan: RolePlan, dir: string): Promise<EmittedAg
     }),
   );
 
-  // The toolsets of the seats this run minted, so a later MCP tool call can be
-  // judged against the grant the seat actually got: a read-only seat holds
-  // every connected MCP tool (MCP is additive to a definition's `tools:`), and
-  // the host runs subagents unattended, so the plugin refuses the MCP calls a
-  // read-only seat was not allowed.
-  for (const a of emitted) {
-    const role = plan.roles.find((r) => r.id === a.role)!;
-    recordSeatToolset(a.agent, role.tools);
-  }
-
   await pruneGeneratedAgents(
     dir,
     emitted.map((a) => `${a.agent}.md`),
     plan.runId,
     (path, owner) => {
       if (!recentlyActive(owner, plan.runId)) return;
-      plan.notes.push(
+      notes.push(
         `removed agent file ${path} owned by ${owner}; concurrent role-fleet runs in one working tree are not supported — use a worktree`,
       );
     },
   );
 
-  return emitted;
+  return { agents: emitted, notes };
 }
 
 /** What a run left behind, for a reader who arrives after the session ends. */
@@ -714,7 +771,7 @@ export interface RunManifest {
  */
 export async function writeRunManifest(workDir: string, manifest: RunManifest): Promise<string> {
   await mkdir(workDir, { recursive: true });
-  const path = join(workDir, "plan.json");
+  const path = join(workDir, MANIFEST_FILE);
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return path;
 }

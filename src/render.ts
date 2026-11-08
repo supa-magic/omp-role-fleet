@@ -124,6 +124,8 @@ export interface DispatchItem {
   effort: TaskEffort;
   artifact: string;
   dependsOn: string[];
+  /** Roster names this seat waits on: it starts once every one has delivered. */
+  after: string[];
   writesOwnReport: boolean;
 }
 
@@ -135,14 +137,16 @@ export interface DispatchPlanGroup {
 }
 
 /**
- * The machine-readable dispatch plan: the same batches the markdown renders,
- * with the roster names allocated once across the run. Tool callers get this in
- * `details` so they do not have to parse prose to find wave boundaries, renames
- * or artifact paths.
+ * The machine-readable dispatch plan, with the roster names allocated once
+ * across the run. `wave` is the dependency depth, kept for display; the
+ * scheduling contract is each item's `after`: a seat starts when every seat it
+ * lists has delivered, not when its whole wave has. Tool callers get this in
+ * `details` so they do not have to parse prose for renames or artifact paths.
  */
 export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
   const everyAgent = groups.flatMap((g) => g.agents);
   const names = allocateRosterNames(everyAgent);
+  const nameOfRole = new Map(everyAgent.map((a, i) => [a.role, names[i]!]));
   let next = 0;
   return groups.map((g) => ({
     wave: g.wave,
@@ -157,6 +161,7 @@ export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
       effort: a.effort,
       artifact: a.artifact,
       dependsOn: [...a.dependsOn],
+      after: a.dependsOn.map((d) => nameOfRole.get(d)).filter((n): n is string => n !== undefined),
       writesOwnReport: a.writesOwnReport,
     })),
   }));
@@ -187,70 +192,81 @@ function renderModelTable(
   ];
 }
 
-/** Markdown the main model acts on: one task batch per wave. */
+/**
+ * Markdown the main model acts on: seats start as soon as their own
+ * dependencies have delivered, not when a whole wave has.
+ *
+ * A wave barrier makes a seat wait on unrelated siblings of its dependency: a
+ * reviewer that needs only the scout sat behind a ten-minute security audit in
+ * the same wave. Readiness per seat is the critical path the plan actually
+ * has. Seats that become ready together still go out as one batch.
+ */
 export function renderDispatch(groups: DispatchGroup[], agentDir: string): string {
   if (!groups.length) return "No roles to dispatch.";
   const lines: string[] = [];
-  // Allocated across every wave, not per wave: the roster id is how the main
-  // model refers to an agent for the whole run, so uniqueness is a run-level
-  // property even though each wave is its own dispatch batch.
+  // Allocated across the run: the roster id is how the main model refers to a
+  // seat for the whole run, and dependencies are stated in roster ids.
   const planned = dispatchPlan(groups);
   const everyAgent = planned.flatMap((g) => g.agents);
   const nameOf = new Map(everyAgent.map((a) => [a.agent, a.name]));
-  planned.forEach((g, i) => {
-    const label = g.conflicted
-      ? " — dependency conflict: dispatch sequentially and reconcile"
-      : g.parallel
-        ? " — dispatch as ONE parallel task batch"
-        : "";
-    lines.push(`### Wave ${g.wave}${label}`, "");
-    // `name` becomes the roster id; without it omp invents an AdjectiveNoun
-    // name that says nothing about the role. `model` is deliberately absent:
-    // the task tool has no such field — the agent definition pins the model.
-    // `effort` IS present: host precedence is caller effort > modelRoles
-    // `:suffix` > agent `thinking-level`, so without this field modelRoles
-    // erase the seat's planned thinking (scout low becomes :auto/:high).
+  const conflicted = planned.filter((g) => g.conflicted).flatMap((g) => g.agents);
+  const scheduled = everyAgent.filter((a) => !conflicted.includes(a));
+  const now = scheduled.filter((a) => a.after.length === 0);
+  const later = scheduled.filter((a) => a.after.length > 0);
+
+  // `name` becomes the roster id; `model` is absent (the definition pins it);
+  // `effort` is present because only a caller effort beats a modelRoles suffix.
+  const block = (seats: DispatchItem[]): string[] => [
+    "```json",
+    JSON.stringify(seats.map((a) => ({ name: a.name, agent: a.agent, effort: a.effort })), null, 2),
+    "```",
+    "",
+  ];
+  const batchLabel = (seats: DispatchItem[]): string => (seats.length > 1 ? " — dispatch as ONE parallel task batch" : "");
+  lines.push(`### Start now${batchLabel(now)}`, "", ...block(now));
+  if (later.length) {
+    // Seats waiting on the same set become ready at the same moment, so they
+    // share one batch. Results auto-deliver per seat (`wait` returns on the
+    // FIRST settled seat), so readiness is checked as each result arrives.
+    const byAfter = new Map<string, DispatchItem[]>();
+    for (const a of later) {
+      const key = a.after.join("\u0000");
+      byAfter.set(key, [...(byAfter.get(key) ?? []), a]);
+    }
     lines.push(
-      "```json",
-      JSON.stringify(
-        g.agents.map((a) => ({ name: a.name, agent: a.agent, effort: a.effort })),
-        null,
-        2,
-      ),
-      "```",
+      "### Then, as dependencies deliver",
+      "",
+      "Start each batch below as soon as every seat it names has delivered its result —",
+      "do not hold it for seats it does not name, and do not wait for a whole wave.",
       "",
     );
-    lines.push(`Agent definitions: \`${agentDir}\`.`);
-    if (i < planned.length - 1) {
-      // The old wording here was "Wait for wave N to settle before starting wave
-      // N+1", and it was read as a `wait` call. `wait` returns on the FIRST
-      // settled seat, not when the wave is done, so a three-seat wave produced
-      // three `wait` calls and three identical "waiting on 3 of 4 jobs" panels in
-      // the transcript — one per call, each a snapshot of the same running jobs.
-      // The host delivers every seat's result on its own
-      // (`task-async-contract.md`: "Results auto-deliver; NEVER poll"), so the
-      // wave boundary is a fact about which seats have reported, not something
-      // to be waited for.
-      lines.push(
-        `Every seat of wave ${g.wave} reports on its own as it finishes; start wave ${g.wave + 1} only after every seat of wave ${g.wave} has delivered its result.`,
-        "",
-      );
+    for (const seats of byAfter.values()) {
+      lines.push(`#### After ${seats[0]!.after.map((n) => `\`${n}\``).join(", ")}${batchLabel(seats)}`, "", ...block(seats));
     }
-  });
+  }
+  if (conflicted.length) {
+    lines.push(
+      "### Seats in a dependency conflict — dispatch sequentially and reconcile",
+      "",
+      "These seats wait on each other; start them one at a time after every seat above has delivered:",
+      "",
+      ...block(conflicted),
+    );
+  }
+  lines.push(`Agent definitions: \`${agentDir}\`.`, "");
   lines.push(...renderModelTable(everyAgent, nameOf));
-  // A read-only seat cannot write its own artifact, and the seat brief tells it
-  // so — but the brief is written for the subagent, and the brief never reaches
-  // the party that would have to act on it. The downstream briefs point at those
-  // same paths ("Upstream artifacts"), so without this line the run depends on
-  // the main model independently guessing that it is the orchestrator named in
-  // the seat's instructions. Naming it here is what makes the contract a channel
-  // instead of a convention.
+  // The plugin places a read-only seat's report from the seat's own session
+  // when it yields, so the main model never re-types a full report between
+  // waves — that was one output-bound turn per read-only seat on the critical
+  // path. The fallback stays named, because a seat that failed to yield the
+  // schema leaves no file and its downstream seats are told to read one.
   const readOnly = everyAgent.filter((a) => !a.writesOwnReport);
   if (readOnly.length) {
     lines.push(
-      "Read-only seats cannot write their artifact path. After each of these settles,",
-      "write its FULL returned `report` (not the summary) to the path below, before",
-      "starting the next wave — a downstream seat is told to read that file:",
+      "Read-only seats cannot write their artifact path; the plugin writes each one's full",
+      "`report` there when the seat yields. Do not copy reports yourself. Only if a path below",
+      "is still missing after its seat settled, write that seat's FULL `report` there",
+      "before dispatching the seats that wait on it:",
       "",
       ...readOnly.map((a) => `- \`${nameOf.get(a.agent)}\` → ${a.artifact}`),
       "",
@@ -268,7 +284,7 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
       ...sliceSeats.map((a) => `- \`${nameOf.get(a.agent)}\``),
       "",
       "Give each one the exact files it owns — from the scout's map — and tell it to touch",
-      "no path outside that set. They are one parallel wave: two seats that were not told",
+      "no path outside that set. They start together: two seats that were not told",
       "apart will edit the same files.",
       "",
     );
@@ -315,19 +331,19 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
   // differing in what they warn about is the asymmetry this closes.
   lines.push(
     "Every agent above already exists as an omp agent definition whose model, tool",
-    "grant, and thinking level are pinned in its file. Dispatch each wave with the",
-    "task tool as a single batch. Seat results are delivered to you automatically",
-    "as each seat finishes — do not poll `wait` for them (a `wait` call returns on",
-    "the FIRST settled seat and each call re-renders the same \"waiting on N jobs\"",
-    "panel). Call `wait` only when you are completely blocked and have nothing else",
-    "to do. Start the next wave only after every seat of this wave has delivered",
+    "grant, and thinking level are pinned in its file. Dispatch with the task tool,",
+    "one batch per set of seats that are ready together. Seat results are delivered",
+    "to you automatically as each seat finishes — do not poll `wait` for them (a",
+    "`wait` call returns on the FIRST settled seat and each call re-renders the same",
+    "\"waiting on N jobs\" panel). Call `wait` only when you are completely blocked and",
+    "have nothing else to do. A seat starts once every seat it lists has delivered",
     "its result.",
     // Identity + effort must pass through verbatim. The host requires `task` on
     // every item and declares `solutionSpace` beside it; `effort` is the only
     // spawn field that can beat a modelRoles thinking suffix, so it is rendered
     // in the batch and must not be invented or dropped.
     "Pass each item's `name`, `agent`, and `effort` exactly as given — the roster",
-    "id is what the table above and every later wave address that seat by, and",
+    "id is what the table above and every later batch address that seat by, and",
     "`effort` is the seat's thinking budget (`lo`/`med`/`hi`) the host applies over",
     "modelRoles suffixes. Give each item its own `task` text (the host rejects an",
     "item without one) plus a `solutionSpace` line describing how open-ended that",

@@ -4,25 +4,27 @@
  * No configuration is consulted. The fan-out is deliberately conservative: a
  * task gets only the roles its shape implies, and the cap bounds the worst case
  * on a vague request.
+ *
+ * The work is a sequence of small passes over the plan, each one pure: it reads
+ * what the previous pass produced and returns the next state. The order the
+ * passes run in is the order the seats and the notes appear in, so the plan a
+ * task gets is the same whichever pass is read.
  */
 import { join } from "node:path";
-import type { Capability, Effort, RolePlan, RoleSpec } from "./core.ts";
+import type { Capability, RolePlan, RoleSpec } from "./core.ts";
 import { applySpecialists, SPECIALISTS } from "./library.ts";
-import { aliasFor, BUILD_TOOLS, CAPABILITY_ID, DEFAULT_MAX_ROLES, grantsWrite, isCouncilMember, isSliceSeat, MAX_SLICES, READ_TOOLS, VOCAB, WRITE_TOOLS } from "./core.ts";
-
-/** Every classification below reads `core.VOCAB`. The six regexes that used to
- *  live here were the divergence that table removes; it carries the two rules
- *  (verbs apart from nouns, `\b` on both sides) and the reason for each entry. */
-
-/** Drop order when the cap bites: implementation is never dropped first. */
-const KEEP_PRIORITY: Record<Capability, number> = {
-  code: 0,
-  scout: 1,
-  review: 2,
-  plan: 3,
-  test: 4,
-  docs: 5,
-};
+import {
+  BUILD_TOOLS,
+  DEFAULT_MAX_ROLES,
+  grantsWrite,
+  isCouncilMember,
+  isSliceSeat,
+  MAX_SLICES,
+  READ_TOOLS,
+  SEAT_CATALOG,
+  VOCAB,
+  WRITE_TOOLS,
+} from "./core.ts";
 
 /**
  * Alias order for a review council.
@@ -31,16 +33,11 @@ const KEEP_PRIORITY: Record<Capability, number> = {
  * when those aliases are mapped to different providers — distinct providers too,
  * which is the point: the same blind spot is unlikely across providers.
  */
-const COUNCIL_ALIAS = ["@slow", "@task", "@plan"];
-
-const EFFORT: Record<Capability, Effort> = {
-  scout: "low",
-  plan: "high",
-  code: "medium",
-  test: "medium",
-  review: "high",
-  docs: "low",
-};
+const COUNCIL_ALIAS = [
+  SEAT_CATALOG.base.review.alias,
+  SEAT_CATALOG.base.code.alias,
+  SEAT_CATALOG.base.plan.alias,
+];
 
 export interface PlanOptions {
   task: string;
@@ -97,37 +94,56 @@ export function isDegenerateCast(roles: ReadonlyArray<Pick<RoleSpec, "core">>): 
   return roles.length === 1 && roles[0]!.core === "scout";
 }
 
-export function synthesizePlan(opts: PlanOptions): RolePlan {
-  const { task, cwd, workDir } = opts;
-  const requestedCap = opts.maxRoles ?? DEFAULT_MAX_ROLES;
-  // A change cast needs at least an investigator and a worker. At a cap of one
-  // the priority order kept the implementer and dropped the scout, so the seat
-  // told to "implement the locked plan" had no plan and no investigation; the
-  // floor is two, and the caller is told when the ask was raised.
-  const maxRoles = Math.max(2, requestedCap);
-  const notes: string[] = [];
-  if (requestedCap < maxRoles) notes.push(`role cap ${requestedCap} raised to ${maxRoles}: a cast needs a worker and an investigator`);
+/**
+ * What the task text and the flags imply about the work.
+ *
+ * Every classification reads `core.VOCAB`; the regexes that used to live here
+ * were the divergence that table removes.
+ */
+interface Intent {
+  /** The task asks for checks to be run rather than for a change. */
+  verifyAsk: boolean;
+  /** The task asks for documentation. */
+  docsAsk: boolean;
+  /** The docs seat writes rather than reads. */
+  docsWrites: boolean;
+  /** The cast needs an implementer. */
+  wantsCode: boolean;
+  /** The cast needs a planner: broad-scope work earns one more serial wave. */
+  wantsPlan: boolean;
+  /** The cast needs a vision seat. */
+  needsVision: boolean;
+  /** The task asks to look, not to change: no seat in the cast may write. */
+  analysisIntent: boolean;
+  /** The cast needs a reviewer. */
+  wantsReview: boolean;
+}
 
-  // A migration that names no code vocabulary is still a change: "migrate off
-  // lodash", "upgrade the deps", "move off webpack" carry no unconditional
-  // `VOCAB.changeStrong` verb. Reading the shape off the catalog pattern is what keeps the
-  // README's promise ("a migration is implementation, so the runner replaces the
-  // implementer"); without it the specialist is skipped for want of an
-  // implementer to replace, and a task that asked to change the tree ships a
-  // scout and a reviewer that reviews nothing. What vetoes it is a look-verb —
-  // "research migration options" is a look at a migration, not a migration, and
-  // it must not mint a writer. The veto is a verb list and never a noun list:
-  // "upgrade the library to the latest version" is a migration that `library`
-  // and `version` would otherwise veto, naming a subject as often as a task.
-  //
-  // The verb sets are split by ambiguity: `fix`/`add`/`refactor` are verbs and
-  // always mint the code cast, while `build`/`update`/`write` are also ordinary
-  // nouns and mint it only when nothing asks to look. Reading them as one list
-  // is what let "profile the write path" and "compare the read path with the
-  // write path" ship a shell-holding implementer for a measurement.
-  // "review" is both the verb and the name of a product surface. When it names a
-  // subject and the sentence reports a defect, the defect wins: the review page
-  // showing stale data is a bug to fix, not a read-only review of the codebase.
+/**
+ * Read the task's shape.
+ *
+ * A migration that names no code vocabulary is still a change: "migrate off
+ * lodash", "upgrade the deps", "move off webpack" carry no unconditional
+ * `VOCAB.changeStrong` verb. Reading the shape off the catalog pattern is what
+ * keeps the README's promise ("a migration is implementation, so the runner
+ * replaces the implementer"); without it the specialist is skipped for want of
+ * an implementer to replace, and a task that asked to change the tree ships a
+ * scout and a reviewer that reviews nothing. What vetoes it is a look-verb —
+ * "research migration options" is a look at a migration, not a migration, and
+ * it must not mint a writer. The veto is a verb list and never a noun list:
+ * "upgrade the library to the latest version" is a migration that `library`
+ * and `version` would otherwise veto, naming a subject as often as a task.
+ *
+ * The verb sets are split by ambiguity: `fix`/`add`/`refactor` are verbs and
+ * always mint the code cast, while `build`/`update`/`write` are also ordinary
+ * nouns and mint it only when nothing asks to look. Reading them as one list
+ * is what let "profile the write path" and "compare the read path with the
+ * write path" ship a shell-holding implementer for a measurement.
+ * "review" is both the verb and the name of a product surface. When it names a
+ * subject and the sentence reports a defect, the defect wins: the review page
+ * showing stale data is a bug to fix, not a read-only review of the codebase.
+ */
+function classifyIntent(task: string, opts: PlanOptions): Intent {
   const looks = VOCAB.look.test(task) && !(VOCAB.reviewSubject.test(task) && VOCAB.defect.test(task));
   const migrationShape = SPECIALISTS.some((s) => s.replacesImplementer && s.match.test(task));
   const changesTree =
@@ -138,8 +154,8 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
   // An ask to run the checks is a verifier's work, not an implementation: "test
   // the checkout flow" wants the tester, and used to get an implementer beside
   // it because "test" is also a code subject. This reads `changesTree`, not the
-  // raw verb list: a migration may name a test suite ("migrate the test suite to
-  // vitest") and still be a change, and re-testing the weaker predicate here
+  // raw verb list: a migration may name a test suite ("migrate the test suite
+  // to vitest") and still be a change, and re-testing the weaker predicate here
   // dropped its writer.
   const verifyAsk = VOCAB.verify.test(task) && !changesTree;
   // Documentation is a shape of its own. "update the readme" and "write the
@@ -178,103 +194,156 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
   const wantsReview =
     VOCAB.review.test(task) || wantsCode || (VOCAB.multiFile.test(task) && !looks);
 
-  const codeCast: Capability[] = ["scout", ...(wantsPlan ? (["plan"] as Capability[]) : []), "code"];
+  return {
+    verifyAsk,
+    docsAsk,
+    docsWrites,
+    wantsCode,
+    wantsPlan,
+    needsVision,
+    analysisIntent,
+    wantsReview,
+  };
+}
+
+/** The seats the task's shape implies, before the cap is applied. */
+function pickCapabilities(intent: Intent, task: string, reviewOnly: boolean): { caps: Capability[]; notes: string[] } {
+  const notes: string[] = [];
+  const codeCast: Capability[] = ["scout", ...(intent.wantsPlan ? (["plan"] as Capability[]) : []), "code"];
   // A UI task seats the designer over a separate tester (see the note below).
-  if (!needsVision) codeCast.push("test");
-  const caps: Capability[] = opts.reviewOnly
+  if (!intent.needsVision) codeCast.push("test");
+  const caps: Capability[] = reviewOnly
     ? ["scout", "review"]
-    : wantsCode
+    : intent.wantsCode
       ? codeCast
-      : verifyAsk
+      : intent.verifyAsk
         ? ["scout", "test"]
         : ["scout"];
-  if (!opts.reviewOnly) {
-    if (docsAsk || (VOCAB.research.test(task) && !wantsCode)) caps.push("docs");
-    if (wantsReview) caps.push("review");
+  if (!reviewOnly) {
+    if (intent.docsAsk || (VOCAB.research.test(task) && !intent.wantsCode)) caps.push("docs");
+    if (intent.wantsReview) caps.push("review");
     // A UI task's designer *is* its implementation — the seat's own acceptance
     // covers the interface, its states and its accessibility — so the designer
     // takes the seat and the separate tester is the one the cap can spend. The
     // other order ships an implementer and a tester for a page nobody was asked
     // to design.
-    if (needsVision && wantsCode) notes.push("ui task: the designer takes the seat a tester would hold");
+    if (intent.needsVision && intent.wantsCode) {
+      notes.push("ui task: the designer takes the seat a tester would hold");
+    }
     // An analysis cast has to be able to answer the task it was thinned for: a
     // look-ask with no other seat would ship one investigator whose report
     // nobody reads. A cast that already answers it (a researcher, an auditor)
     // needs no addition.
-    if (analysisIntent && !caps.includes("review") && caps.length === 1) caps.push("review");
+    if (intent.analysisIntent && !caps.includes("review") && caps.length === 1) caps.push("review");
   }
-  if (opts.reviewOnly) notes.push("review-only: scout and review seats; no seat can change the code");
+  if (reviewOnly) notes.push("review-only: scout and review seats; no seat can change the code");
+  return { caps, notes };
+}
 
+/**
+ * The cap: which seats survive, in which order, and which are dropped.
+ *
+ * Drop order when the cap bites: implementation is never dropped first.
+ */
+function applyCap(caps: Capability[], maxRoles: number): { kept: Capability[]; dropped: Capability[]; notes: string[] } {
   const unique = [...new Set(caps)];
   const kept = [...unique]
-    .sort((a, b) => KEEP_PRIORITY[a] - KEEP_PRIORITY[b])
+    .sort((a, b) => SEAT_CATALOG.base[a].keepPriority - SEAT_CATALOG.base[b].keepPriority)
     .slice(0, maxRoles)
     .sort((a, b) => unique.indexOf(a) - unique.indexOf(b));
   const dropped = unique.filter((c) => !kept.includes(c));
-  if (dropped.length) notes.push(`role cap ${maxRoles}: dropped ${dropped.join(", ")}`);
+  return {
+    kept,
+    dropped,
+    notes: dropped.length ? [`role cap ${maxRoles}: dropped ${dropped.join(", ")}`] : [],
+  };
+}
 
-  let drafts: RoleSpec[] = [];
+/** What the draft builder needs to know about the task. */
+interface DraftContext {
+  task: string;
+  workDir: string;
+  analysisIntent: boolean;
+  needsVision: boolean;
+  verifyAsk: boolean;
+  docsWrites: boolean;
+  wantsCode: boolean;
+}
+
+/**
+ * Draft one seat per capability.
+ *
+ * Capability names differ from seat names, so the seat id comes from the
+ * catalog rather than from a second copy of the mapping.
+ */
+function draftRoles(kept: Capability[], ctx: DraftContext): RoleSpec[] {
+  const drafts: RoleSpec[] = [];
   for (const cap of kept) {
-    // Capability names differ from seat names in three places, so the seat id
-    // and the fleet seat are one lookup rather than two copies of it.
-    const id = CAPABILITY_ID[cap];
-    const dep = (seat: string): string[] => (drafts.some((d) => d.id === seat) ? [seat] : []);
+    const seat = SEAT_CATALOG.base[cap];
+    const id = seat.id;
+    const dep = (target: string): string[] => (drafts.some((d) => d.id === target) ? [target] : []);
     const base = {
       core: id,
-      model: aliasFor(id),
-      effort: EFFORT[cap],
-      needsVision: cap === "scout" ? needsVision : false,
+      model: seat.alias,
+      // The single reviewer that gates a delivered change runs at medium
+      // effort: it is the last seat standing in the final wave, so its
+      // thinking budget paces the whole run. A run whose deliverable *is* the
+      // review — analysis intent, or security wording — keeps it high, as do
+      // council members and the consul.
+      effort:
+        cap === "review" && !ctx.analysisIntent && !VOCAB.security.test(ctx.task) ? "medium" : seat.effort,
+      needsVision: cap === "scout" ? ctx.needsVision : false,
     };
     const draft = {
       scout: {
         id,
-        title: "Investigator",
-        mission: `Locate every place this task touches and report current behavior with file:line evidence: ${task}`,
+        title: seat.title,
+        mission: `Locate every place this task touches and report current behavior with file:line evidence: ${ctx.task}`,
         acceptance: ["Affected files/symbols mapped with evidence", "No files modified"],
         dependsOn: [] as string[],
         tools: READ_TOOLS,
-        artifact: `${workDir}/scout.md`,
+        artifact: `${ctx.workDir}/scout.md`,
       },
       plan: {
         id,
-        title: "Planner",
+        title: seat.title,
         mission: "Turn the investigation into a locked implementation plan with exact files and ordered steps.",
         acceptance: ["Ordered steps naming exact files", "Open questions listed explicitly"],
-        dependsOn: dep(CAPABILITY_ID.scout),
+        dependsOn: dep(SEAT_CATALOG.base.scout.id),
         tools: READ_TOOLS,
-        artifact: `${workDir}/plan.md`,
+        artifact: `${ctx.workDir}/plan.md`,
       },
       code: {
         id,
-        title: "Implementer",
+        title: seat.title,
         mission: "Implement the locked plan. Smallest correct change; do not expand scope.",
         acceptance: ["Requested behavior implemented", "Focused check executed and its real output reported"],
-        dependsOn: dep(CAPABILITY_ID.plan).length ? [CAPABILITY_ID.plan] : dep(CAPABILITY_ID.scout),
+        dependsOn: dep(SEAT_CATALOG.base.plan.id).length ? [SEAT_CATALOG.base.plan.id] : dep(SEAT_CATALOG.base.scout.id),
         // A shell, because the acceptance line asks for a check *executed*: the
         // edit/write pair cannot run one.
         tools: BUILD_TOOLS,
-        artifact: `${workDir}/implementation.md`,
+        artifact: `${ctx.workDir}/implementation.md`,
       },
       test: {
         id,
         // A verifier, when the task asked for checks rather than for a change:
         // "test the checkout flow" is not an implementation, and the seat it
         // wants is the one that runs things and reports output.
-        title: verifyAsk ? "Verifier" : "Tester",
-        mission: verifyAsk
+        title: ctx.verifyAsk ? "Verifier" : seat.title,
+        mission: ctx.verifyAsk
           ? "Run the checks this task asks for and report their real output with evidence."
           : "Run the focused checks for the delivered change and report real output.",
-        acceptance: verifyAsk
+        acceptance: ctx.verifyAsk
           ? ["Exact commands run", "Real pass/fail output", "Each claim backed by the output that shows it"]
           : ["Exact commands run", "Real pass/fail output", "Failures reproduced, not assumed"],
-        dependsOn: verifyAsk ? dep(CAPABILITY_ID.scout) : dep(CAPABILITY_ID.code),
+        dependsOn: ctx.verifyAsk ? dep(SEAT_CATALOG.base.scout.id) : dep(SEAT_CATALOG.base.code.id),
         // Same grant as the implementer: "exact commands run" needs a shell.
         tools: BUILD_TOOLS,
-        artifact: `${workDir}/test-report.md`,
+        artifact: `${ctx.workDir}/test-report.md`,
       },
       review: {
         id,
-        title: "Reviewer",
+        title: seat.title,
         // No authority claim in the mission: the grant decides it, and the
         // frontmatter's grant note and the brief's `## Upstream artifacts` line
         // say what this seat may write, from `role.tools`, so a second copy here
@@ -286,163 +355,177 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
         // scout it is supposed to review, so it judged an empty tree. The same
         // fallback the council uses one stage later: code, else the verifier,
         // else the docs seat, else the scout.
-        dependsOn: dep(CAPABILITY_ID.code).length
-          ? dep(CAPABILITY_ID.code)
-          : dep(CAPABILITY_ID.test).length
-            ? dep(CAPABILITY_ID.test)
-            : dep(CAPABILITY_ID.docs).length
-              ? dep(CAPABILITY_ID.docs)
-              : dep(CAPABILITY_ID.scout),
+        dependsOn: dep(SEAT_CATALOG.base.code.id).length
+          ? dep(SEAT_CATALOG.base.code.id)
+          : dep(SEAT_CATALOG.base.test.id).length
+            ? dep(SEAT_CATALOG.base.test.id)
+            : dep(SEAT_CATALOG.base.docs.id).length
+              ? dep(SEAT_CATALOG.base.docs.id)
+              : dep(SEAT_CATALOG.base.scout.id),
         tools: READ_TOOLS,
-        artifact: `${workDir}/review.md`,
+        artifact: `${ctx.workDir}/review.md`,
       },
       docs: {
         id,
-        title: "Docs updater",
+        title: seat.title,
         // A writer when the ask is a documentation change or a code change to
         // document, a researcher when the ask is to find something out:
         // "research the library docs" needs a finding, not a licence to edit.
-        mission: docsWrites
-          ? wantsCode
+        mission: ctx.docsWrites
+          ? ctx.wantsCode
             ? "Update user-facing documentation to match the delivered behavior."
             : "Write the documentation this task asks for."
-          : `Research and summarize: ${task}`,
-        acceptance: docsWrites
+          : `Research and summarize: ${ctx.task}`,
+        acceptance: ctx.docsWrites
           ? ["Docs written and internally consistent", "Documented commands verified against code"]
           : ["Every claim backed by a primary source"],
-        dependsOn: docsWrites ? (wantsCode ? dep(CAPABILITY_ID.code) : dep(CAPABILITY_ID.scout)) : [],
-        tools: docsWrites ? WRITE_TOOLS : READ_TOOLS,
-        artifact: `${workDir}/docs.md`,
+        dependsOn: ctx.docsWrites
+          ? ctx.wantsCode
+            ? dep(SEAT_CATALOG.base.code.id)
+            : dep(SEAT_CATALOG.base.scout.id)
+          : [],
+        tools: ctx.docsWrites ? WRITE_TOOLS : READ_TOOLS,
+        artifact: `${ctx.workDir}/docs.md`,
       },
     }[cap];
     drafts.push({ ...draft, ...base } as RoleSpec);
   }
+  return drafts;
+}
 
-  // Only the cap can leave a change-shaped task without an implementer: every
-  // other way an implementer is absent was decided above, and blaming "role cap"
-  // for the cast `--review-only` asked for reports a cap that never bit.
-  if (wantsCode && dropped.includes("code")) {
-    notes.push(`role cap ${maxRoles} left no implementer; plan is analysis-only`);
-  }
-
-  if (analysisIntent) {
-    // The implementer and tester were drafted because words like "code", "api",
-    // or "test" hit the vocabulary — in a task that only asks to look. Keeping
-    // them spends two paid runs on seats the request never asked for, and at the
-    // cap pushes out the reviewer or auditor the task exists for. The tester
-    // stays when the task asked for checks: that seat *is* the answer there, and
-    // dropping it would remove the only one that could give it.
-    const before = drafts.map((r) => r.id);
-    const thinned = drafts.filter((r) => r.id !== "implementer" && !(r.id === "tester" && !verifyAsk));
-    if (thinned.length !== before.length) {
-      const gone = before.filter((id) => !thinned.some((r) => r.id === id));
-      drafts = thinned;
-      notes.push(`analysis intent: ${gone.join("/")} dropped for the review seats`);
-    }
-  }
-
-  // Specialist tier: hand-written seats for shapes the base cast serves poorly.
-  // The cap applies after: a specialist never squeezes the implementer out.
-  const drafted = applySpecialists(
-    drafts,
-    task,
-    workDir,
-    notes,
-    (id) => drafts.some((d) => d.id === id),
-    analysisIntent,
+/**
+ * Thin an analysis cast: drop the seats the task never asked for.
+ *
+ * The implementer and tester were drafted because words like "code", "api",
+ * or "test" hit the vocabulary — in a task that only asks to look. Keeping
+ * them spends two paid runs on seats the request never asked for, and at the
+ * cap pushes out the reviewer or auditor the task exists for. The tester
+ * stays when the task asked for checks: that seat *is* the answer there, and
+ * dropping it would remove the only one that could give it.
+ */
+function thinForAnalysis(drafts: RoleSpec[], verifyAsk: boolean): { roles: RoleSpec[]; notes: string[] } {
+  const before = drafts.map((r) => r.id);
+  const thinned = drafts.filter(
+    (r) => r.id !== SEAT_CATALOG.base.code.id && !(r.id === SEAT_CATALOG.base.test.id && !verifyAsk),
   );
+  if (thinned.length === before.length) return { roles: drafts, notes: [] };
+  const gone = before.filter((id) => !thinned.some((r) => r.id === id));
+  return {
+    roles: thinned,
+    notes: [`analysis intent: ${gone.join("/")} dropped for the review seats`],
+  };
+}
 
-  // A removed role takes the edges pointing at it along: the audit thinning and
-  // a replacing specialist both drop a role other roles still wait on, and one
-  // dangling edge makes `validatePlan` reject the entire plan — no agents, no
-  // dispatch, no partial result. Dependents wait on the scout instead.
-  const surviving = new Set(drafted.map((r) => r.id));
-  drafted.forEach((r, i) => {
+/**
+ * Replace edges that point at a role the plan no longer holds.
+ *
+ * The audit thinning and a replacing specialist both drop a role other roles
+ * still wait on, and one dangling edge makes `validatePlan` reject the entire
+ * plan — no agents, no dispatch, no partial result. Dependents wait on the
+ * scout instead.
+ */
+function repairDependencies(roles: RoleSpec[]): { roles: RoleSpec[]; notes: string[] } {
+  const notes: string[] = [];
+  const surviving = new Set(roles.map((r) => r.id));
+  const repaired = roles.map((r) => {
     const dangling = (r.dependsOn ?? []).filter((d) => !surviving.has(d));
-    if (!dangling.length) return;
+    if (!dangling.length) return r;
     // Edges that survived stay; only the dead ones are replaced, so a role
     // waiting on two things does not lose the one that is still planned.
     const kept = (r.dependsOn ?? []).filter((d) => surviving.has(d));
-    const fallback = kept.length ? kept : surviving.has("scout") ? ["scout"] : [];
+    const fallback = kept.length ? kept : surviving.has(SEAT_CATALOG.base.scout.id) ? [SEAT_CATALOG.base.scout.id] : [];
     notes.push(
       `role ${r.id}: dependency ${dangling.join(", ")} left the plan${fallback.length ? ` — waiting on ${fallback.join(", ")} instead` : ""}`,
     );
-    // A replaced object, not a mutation of the one in the array: the council
-    // and consul blocks below do write fields in place on objects they found,
-    // but this one builds its role here and hands the caller the result, so the
-    // drafts a few lines above must not be reachable from anywhere else. Copying
-    // keeps that true if the pass is ever moved.
-    drafted[i] = { ...r, dependsOn: fallback };
+    return { ...r, dependsOn: fallback };
   });
+  return { roles: repaired, notes };
+}
 
-  // Slice fan-out: one implementation across several writers, when asked for.
-  // It runs after the specialists so that a migration — one writer by design,
-  // since two writers on the same files is a defect rather than a feature — has
-  // already taken the implementer's place and refuses the split here, and after
-  // the edge repair so the seats that waited on `implementer` are the ones
-  // rewritten below.
-  const slices = Math.min(opts.slices ?? 1, MAX_SLICES);
-  if (slices > 1) {
-    const at = drafted.findIndex((r) => r.id === CAPABILITY_ID.code);
-    const split = drafted[at];
-    if (at === -1 || split === undefined) {
-      notes.push(`--slices ${slices}: no implementer seat to fan out — the cast is ${drafted.map((r) => r.id).join(", ")}`);
-    } else {
-      const sliceSeats: RoleSpec[] = [];
-      for (let i = 1; i <= slices; i++) {
-        sliceSeats.push({
-          ...split,
-          id: `implementer-${i}`,
-          title: `Implementer ${i}`,
-          // Which files these are is not knowable here: the map arrives with the
-          // scout's report, which the orchestrator reads before dispatching. So
-          // the seat is told the shape of its authority, and the dispatch tells
-          // the orchestrator to name the files in the item.
-          mission:
-            "Implement the slice your dispatch item assigns you, and only that slice: own exactly the files it names, change nothing outside them, and report what you changed and what you checked.",
-          acceptance: [
-            "The assigned slice implemented",
-            "No file outside the assigned slice touched",
-            "Focused check executed and its real output reported",
-          ],
-          artifact: `${workDir}/implementation-${i}.md`,
-        });
-      }
-      drafted.splice(at, 1, ...sliceSeats);
-      // Everything that waited on the single implementer waits on every slice:
-      // a seat that waited on the first one alone would start before the rest of
-      // the change existed.
-      const ids = sliceSeats.map((r) => r.id);
-      drafted.forEach((r, i) => {
-        if (!(r.dependsOn ?? []).includes(CAPABILITY_ID.code)) return;
-        drafted[i] = {
-          ...r,
-          dependsOn: (r.dependsOn ?? []).flatMap((d) => (d === CAPABILITY_ID.code ? ids : [d])),
-        };
-      });
-      notes.push(
-        `slices: ${slices} implementer seats on one implementation (${ids.join(", ")}) — the file partition comes from the scout's map, so the orchestrator names each seat's files in its dispatch item`,
-      );
-    }
+/**
+ * Fan the implementation out across several writers, when asked for.
+ *
+ * It runs after the specialists so that a migration — one writer by design,
+ * since two writers on the same files is a defect rather than a feature — has
+ * already taken the implementer's place and refuses the split here, and after
+ * the edge repair so the seats that waited on `implementer` are the ones
+ * rewritten below.
+ */
+function fanOutSlices(roles: RoleSpec[], requested: number, workDir: string): { roles: RoleSpec[]; notes: string[] } {
+  const slices = Math.min(requested, MAX_SLICES);
+  if (slices <= 1) return { roles, notes: [] };
+  const at = roles.findIndex((r) => r.id === SEAT_CATALOG.base.code.id);
+  const split = roles[at];
+  if (at === -1 || split === undefined) {
+    return {
+      roles,
+      notes: [`--slices ${slices}: no implementer seat to fan out — the cast is ${roles.map((r) => r.id).join(", ")}`],
+    };
   }
+  const sliceSeats: RoleSpec[] = [];
+  for (let i = 1; i <= slices; i++) {
+    sliceSeats.push({
+      ...split,
+      id: `implementer-${i}`,
+      title: `Implementer ${i}`,
+      // Which files these are is not knowable here: the map arrives with the
+      // scout's report, which the orchestrator reads before dispatching. So
+      // the seat is told the shape of its authority, and the dispatch tells
+      // the orchestrator to name the files in the item.
+      mission:
+        "Implement the slice your dispatch item assigns you, and only that slice: own exactly the files it names, change nothing outside them, and report what you changed and what you checked.",
+      acceptance: [
+        "The assigned slice implemented",
+        "No file outside the assigned slice touched",
+        "Focused check executed and its real output reported",
+      ],
+      artifact: `${workDir}/implementation-${i}.md`,
+    });
+  }
+  // Everything that waited on the single implementer waits on every slice:
+  // a seat that waited on the first one alone would start before the rest of
+  // the change existed.
+  const ids = sliceSeats.map((r) => r.id);
+  const fanned = roles.flatMap((r, i) => (i === at ? sliceSeats : [r])).map((r) =>
+    (r.dependsOn ?? []).includes(SEAT_CATALOG.base.code.id)
+      ? {
+          ...r,
+          dependsOn: (r.dependsOn ?? []).flatMap((d) => (d === SEAT_CATALOG.base.code.id ? ids : [d])),
+        }
+      : r,
+  );
+  return {
+    roles: fanned,
+    notes: [
+      `slices: ${slices} implementer seats on one implementation (${ids.join(", ")}) — the file partition comes from the scout's map, so the orchestrator names each seat's files in its dispatch item`,
+    ],
+  };
+}
 
-  // Council: one change, several pairs of eyes from different providers. It
-  // runs after the cast is final, so a member inherits an upstream that exists
-  // rather than one a thinning pass deleted two lines ago. Reviewers with
-  // distinct aliases ride the same wave, so the reviews are concurrent and
-  // independent; synthesis is the main model's job, guided by the dispatch
-  // prompt.
-  // An explicit list may name more members than the alias fan-out has, so the
-  // clamp follows the ask rather than the alias table.
+/**
+ * The review council: one change, several pairs of eyes from different
+ * providers.
+ *
+ * It runs after the cast is final, so a member inherits an upstream that
+ * exists rather than one a thinning pass deleted two lines ago. Reviewers with
+ * distinct aliases ride the same wave, so the reviews are concurrent and
+ * independent; synthesis is the main model's job, guided by the dispatch
+ * prompt.
+ * An explicit list may name more members than the alias fan-out has, so the
+ * clamp follows the ask rather than the alias table.
+ */
+function applyCouncil(roles: RoleSpec[], opts: PlanOptions, workDir: string): { roles: RoleSpec[]; notes: string[] } {
+  const notes: string[] = [];
   const council = Math.min(opts.council ?? 0, Math.max(COUNCIL_ALIAS.length, opts.models?.length ?? 0));
+  let next = roles;
   // A single named model retargets the reviewer already in the plan instead of
   // minting a council of one: the seat exists, and a second reviewer on the same
   // work would be a duplicate review, not a wider one.
   if (council <= 1 && opts.models?.length === 1) {
-    const reviewer = drafted.find((d) => d.core === "reviewer");
+    const reviewer = next.find((d) => d.core === SEAT_CATALOG.base.review.core);
     if (reviewer) {
       const from = reviewer.model;
-      reviewer.model = opts.models[0]!;
+      next = next.map((r) => (r === reviewer ? { ...r, model: opts.models![0]! } : r));
       notes.push(`reviewer on ${opts.models[0]} (was ${from})`);
     } else {
       // Nothing to retarget: saying so beats a silent no-op, since the user
@@ -451,10 +534,8 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
     }
   }
   if (council > 1) {
-    const reviewer = drafted.find((d) => d.id === "reviewer");
-    if (reviewer) {
-      drafted.splice(drafted.indexOf(reviewer), 1);
-    }
+    const reviewer = next.find((d) => d.id === SEAT_CATALOG.base.review.id);
+    const withoutReviewer = reviewer ? next.filter((r) => r !== reviewer) : next;
     // An analysis-only plan has no reviewer to replace — the council IS the
     // review, so its members join after the scout instead of being dropped
     // because "there was nothing to review". `dependsOn: []` is a real answer,
@@ -462,17 +543,16 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
     const upstream =
       reviewer?.dependsOn?.length
         ? reviewer.dependsOn
-        : drafted.some((d) => d.id === "scout")
-          ? ["scout"]
+        : withoutReviewer.some((d) => d.id === SEAT_CATALOG.base.scout.id)
+          ? [SEAT_CATALOG.base.scout.id]
           : [];
-    const baseMission =
-      reviewer?.mission ??
-      `Assess the subject of this task and report findings with evidence.`;
+    const baseMission = reviewer?.mission ?? `Assess the subject of this task and report findings with evidence.`;
+    const members: RoleSpec[] = [];
     for (let i = 0; i < council; i++) {
-      drafted.push({
+      members.push({
         id: `reviewer-c${i + 1}`,
         title: `Reviewer ${i + 1}`,
-        core: "reviewer",
+        core: SEAT_CATALOG.base.review.core,
         mission: `${baseMission} Independent pass ${i + 1} of ${council}; the other reviewers do not see your report.`,
         acceptance: reviewer?.acceptance ?? [
           "Findings with file:line or an explicit verdict",
@@ -488,6 +568,7 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
         artifact: `${workDir}/review-c${i + 1}.md`,
       });
     }
+    next = [...withoutReviewer, ...members];
     // A member past the end of the named list falls back to its alias, and says
     // so: `--models a,b --council 3` otherwise reads as three named reviews
     // when the third one is nobody's choice.
@@ -497,29 +578,39 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
         (missing > 0 ? ` (${missing} member${missing > 1 ? "s" : ""} past your list kept the default alias)` : ""),
     );
   }
+  return { roles: next, notes };
+}
 
-  // A named consul takes over synthesis from the session model. Without it the
-  // session model reads the council's reports itself — the default, and the
-  // reason this seat is opt-in: an extra paid run the user did not ask for.
-  //
-  // The members' reports have to reach the filesystem for the consul to read
-  // them, and the channel for that already exists: a read-only seat returns its
-  // report as a yield payload and the orchestrator writes it to the seat's
-  // artifact path before the next wave (`render.renderDispatch` says so, and
-  // every downstream brief in every run depends on it). Granting the members
-  // `write` to make that file themselves is redundant authority — `write` takes
-  // any path in the repo, and the seat's own acceptance line is a convention,
-  // not a boundary — so the council keeps its read-only grant and the path is
-  // filled the same way the scout's and the planner's already are.
-  if (opts.consul) {
-    const members = drafted.filter((d) => isCouncilMember(d.id));
-    if (!members.length) {
-      notes.push(`--consul ${opts.consul} had no council members to read — the session model will synthesize`);
-    } else {
-      drafted.push({
+/**
+ * A named consul takes over synthesis from the session model. Without it the
+ * session model reads the council's reports itself — the default, and the
+ * reason this seat is opt-in: an extra paid run the user did not ask for.
+ *
+ * The members' reports have to reach the filesystem for the consul to read
+ * them, and the channel for that already exists: a read-only seat returns its
+ * report as a yield payload and the plugin writes it to the seat's artifact
+ * path before the next wave. Granting the members `write` to make that file
+ * themselves is redundant authority — `write` takes any path in the repo, and
+ * the seat's own acceptance line is a convention, not a boundary — so the
+ * council keeps its read-only grant and the path is filled the same way the
+ * scout's and the planner's already are.
+ */
+function applyConsul(roles: RoleSpec[], opts: PlanOptions, workDir: string): { roles: RoleSpec[]; notes: string[] } {
+  if (!opts.consul) return { roles, notes: [] };
+  const members = roles.filter((d) => isCouncilMember(d.id));
+  if (!members.length) {
+    return {
+      roles,
+      notes: [`--consul ${opts.consul} had no council members to read — the session model will synthesize`],
+    };
+  }
+  return {
+    roles: [
+      ...roles,
+      {
         id: "consul",
-        title: "Consul",
-        core: "consul",
+        title: SEAT_CATALOG.catalog.consul.title,
+        core: SEAT_CATALOG.catalog.consul.core,
         mission:
           "Read every council report in full and reconcile them. State where the reviewers agree and where they " +
           "disagree, and adopt the most conservative finding as the verdict. Name the claims no reviewer backed.",
@@ -535,56 +626,148 @@ export function synthesizePlan(opts: PlanOptions): RolePlan {
         needsVision: false,
         model: opts.consul,
         artifact: `${workDir}/consul.md`,
-      });
-      notes.push(
-        `consul ${opts.consul}: reads ${members.length} council report(s), placed at ${workDir}/ by the orchestrator`,
-      );
-    }
-  }
-  // Council members, the consul and the slice seats are one logical seat each —
-  // the council replaced the single reviewer, the fan-out replaced the single
-  // implementer — so the cap never trades them away: dropping two of three
-  // reviewers is not a smaller council but a broken one, and spending a slot per
-  // writer *file* would drop the tester and the reviewer first, leaving a
-  // fanned-out change unreviewed.
-  // Exempt on `core`, not on the id: `migration-runner` runs the implementer
-  // seat under its own id. Today the two cannot disagree — a migration writer
-  // replaces the implementer in place, so it always lands inside the kept
-  // prefix, and the slice below never sees it — but the id test was correct only
-  // by accident of that insertion order. Keying on the seat that carries the
-  // authority is what makes it correct by construction; the cost is one word.
-  // The position the cap reads is taken over a list where the fan-out occupies
-  // its single slot, so seats after it are measured where they really sit.
-  const firstSliceAt = drafted.findIndex((r) => isSliceSeat(r.id));
-  const perSeat = drafted.filter((r, i) => !isSliceSeat(r.id) || i === firstSliceAt);
+      },
+    ],
+    notes: [
+      `consul ${opts.consul}: reads ${members.length} council report(s), placed at ${workDir}/ by the plugin`,
+    ],
+  };
+}
+
+/**
+ * Apply the cap to the finished cast.
+ *
+ * Council members, the consul and the slice seats are one logical seat each —
+ * the council replaced the single reviewer, the fan-out replaced the single
+ * implementer — so the cap never trades them away: dropping two of three
+ * reviewers is not a smaller council but a broken one, and spending a slot per
+ * writer *file* would drop the tester and the reviewer first, leaving a
+ * fanned-out change unreviewed.
+ * Exempt on `core`, not on the id: `migration-runner` runs the implementer
+ * seat under its own id. Today the two cannot disagree — a migration writer
+ * replaces the implementer in place, so it always lands inside the kept
+ * prefix, and the slice below never sees it — but the id test was correct only
+ * by accident of that insertion order. Keying on the seat that carries the
+ * authority is what makes it correct by construction; the cost is one word.
+ * The position the cap reads is taken over a list where the fan-out occupies
+ * its single slot, so seats after it are measured where they really sit.
+ */
+function applySeatCap(roles: RoleSpec[], maxRoles: number): { roles: RoleSpec[]; notes: string[] } {
+  const notes: string[] = [];
+  const firstSliceAt = roles.findIndex((r) => isSliceSeat(r.id));
+  const perSeat = roles.filter((r, i) => !isSliceSeat(r.id) || i === firstSliceAt);
   const overflowIds = new Set(
     perSeat
       .slice(maxRoles)
-      .filter((r) => r.core !== "implementer" && r.core !== "consul" && !isCouncilMember(r.id))
+      .filter(
+        (r) =>
+          r.core !== SEAT_CATALOG.base.code.core && r.core !== SEAT_CATALOG.catalog.consul.core && !isCouncilMember(r.id),
+      )
       .map((r) => r.id),
   );
-  const overflow = drafted.filter((r) => overflowIds.has(r.id));
-  const roles = overflow.length ? drafted.filter((r) => !overflowIds.has(r.id)) : drafted;
+  const overflow = roles.filter((r) => overflowIds.has(r.id));
+  // A seat that waited on a dropped one keeps waiting on the rest of its list;
+  // an edge to a seat that is not in the plan would fail validation.
+  const kept = overflow.length
+    ? roles
+        .filter((r) => !overflowIds.has(r.id))
+        .map((r) =>
+          (r.dependsOn ?? []).some((d) => overflowIds.has(d))
+            ? { ...r, dependsOn: r.dependsOn.filter((d) => !overflowIds.has(d)) }
+            : r,
+        )
+    : roles;
   if (overflow.length) notes.push(`role cap ${maxRoles}: dropped ${overflow.map((r) => r.id).join(", ")}`);
   // The exempt roles are kept on purpose, but "kept on purpose" is not the same
   // as "the cap was met": `--max-roles 2 --council 3` ships five roles, and the
   // plan said nothing. The real fan-out is what the reader budgets against.
-  if (roles.length > maxRoles) {
-    notes.push(`role cap ${maxRoles} exceeded: ${roles.length} roles (council members, slice seats and the consul are exempt)`);
+  if (kept.length > maxRoles) {
+    notes.push(
+      `role cap ${maxRoles} exceeded: ${kept.length} roles (council members, slice seats and the consul are exempt)`,
+    );
   }
+  return { roles: kept, notes };
+}
+
+export function synthesizePlan(opts: PlanOptions): RolePlan {
+  const { task, cwd, workDir } = opts;
+  const requestedCap = opts.maxRoles ?? DEFAULT_MAX_ROLES;
+  // A change cast needs at least an investigator and a worker. At a cap of one
+  // the priority order kept the implementer and dropped the scout, so the seat
+  // told to "implement the locked plan" had no plan and no investigation; the
+  // floor is two, and the caller is told when the ask was raised.
+  const maxRoles = Math.max(2, requestedCap);
+  const notes: string[] = [];
+  if (requestedCap < maxRoles) {
+    notes.push(`role cap ${requestedCap} raised to ${maxRoles}: a cast needs a worker and an investigator`);
+  }
+
+  const intent = classifyIntent(task, opts);
+  const picked = pickCapabilities(intent, task, Boolean(opts.reviewOnly));
+  notes.push(...picked.notes);
+  const capped = applyCap(picked.caps, maxRoles);
+  notes.push(...capped.notes);
+
+  let drafts = draftRoles(capped.kept, {
+    task,
+    workDir,
+    analysisIntent: intent.analysisIntent,
+    needsVision: intent.needsVision,
+    verifyAsk: intent.verifyAsk,
+    docsWrites: intent.docsWrites,
+    wantsCode: intent.wantsCode,
+  });
+
+  // Only the cap can leave a change-shaped task without an implementer: every
+  // other way an implementer is absent was decided above, and blaming "role cap"
+  // for the cast `--review-only` asked for reports a cap that never bit.
+  if (intent.wantsCode && capped.dropped.includes("code")) {
+    notes.push(`role cap ${maxRoles} left no implementer; plan is analysis-only`);
+  }
+
+  if (intent.analysisIntent) {
+    const thinned = thinForAnalysis(drafts, intent.verifyAsk);
+    drafts = thinned.roles;
+    notes.push(...thinned.notes);
+  }
+
+  // Specialist tier: hand-written seats for shapes the base cast serves poorly.
+  // The cap applies after: a specialist never squeezes the implementer out.
+  const specialistNotes: string[] = [];
+  const drafted = applySpecialists(
+    drafts,
+    task,
+    workDir,
+    specialistNotes,
+    (id) => drafts.some((d) => d.id === id),
+    intent.analysisIntent,
+  );
+  notes.push(...specialistNotes);
+
+  const repaired = repairDependencies(drafted);
+  notes.push(...repaired.notes);
+  const sliced = fanOutSlices(repaired.roles, opts.slices ?? 1, workDir);
+  notes.push(...sliced.notes);
+  const counciled = applyCouncil(sliced.roles, opts, workDir);
+  notes.push(...counciled.notes);
+  const consulted = applyConsul(counciled.roles, opts, workDir);
+  notes.push(...consulted.notes);
+  const cappedAgain = applySeatCap(consulted.roles, maxRoles);
+  notes.push(...cappedAgain.notes);
+  const roles = cappedAgain.roles;
 
   // Stated from the cast that ships rather than promised earlier in the pass:
   // the answer is the grant rule itself now — `edit`, `write` or a shell — so a
   // seat that can run commands cannot leave a cast claiming nothing changes.
   // `--review-only` already said this in its own words.
-  if (analysisIntent && !opts.reviewOnly && !roles.some((r) => grantsWrite(r.tools))) {
+  if (intent.analysisIntent && !opts.reviewOnly && !roles.some((r) => grantsWrite(r.tools))) {
     notes.push("analysis-only intent: no seat in this cast can change the code");
   }
 
   // The structural intent travels with the plan so the pipeline gates the
   // dynamic tier on the same flag the static tier used, instead of asking the
   // shape of the finished cast a question the flags already answered.
-  return { task, cwd, roles, notes, analysisOnly: analysisIntent };
+  return { task, cwd, roles, notes, analysisOnly: intent.analysisIntent };
 }
 
 export interface ProposalMergeOptions {
@@ -611,6 +794,7 @@ export interface ProposalMergeOptions {
  */
 export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: ProposalMergeOptions): RolePlan {
   const base = new Set(plan.roles.map((r) => r.id));
+  const notes = [...plan.notes];
   // A proposal may not claim an id the plan already uses. The parser
   // refuses the static cast and the hand-written specialists, but the
   // council mints `reviewer-c1`… at synthesis time, so a proposal could
@@ -619,8 +803,8 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
   // optional part; it is the one that goes.
   const colliding = proposed.filter((r) => base.has(r.id)).map((r) => r.id);
   if (colliding.length) {
-    plan.notes.push(`specialist proposal rejected — id already in use: ${colliding.join(", ")}`);
-    return plan;
+    notes.push(`specialist proposal rejected — id already in use: ${colliding.join(", ")}`);
+    return { ...plan, notes };
   }
   // A plan that may not write refuses a proposed writer — and so does one whose
   // implementation is already fanned out across slice seats: that cast has every
@@ -632,11 +816,15 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
   // no code changes. `applySpecialists` closes this for the static tier; the
   // dynamic tier has to close it for itself, per seat, so one bad proposal costs
   // one seat instead of the whole tier.
-  const refusing = opts.analysisOnly ? "an analysis-only plan" : plan.roles.some((r) => isSliceSeat(r.id)) ? "a fanned-out plan" : null;
+  const refusing = opts.analysisOnly
+    ? "an analysis-only plan"
+    : plan.roles.some((r) => isSliceSeat(r.id))
+      ? "a fanned-out plan"
+      : null;
   const writers = refusing ? proposed.filter((r) => grantsWrite(r.tools)) : [];
   const writable = writers.length ? proposed.filter((r) => !writers.includes(r)) : proposed;
   if (writers.length) {
-    plan.notes.push(`proposed writer(s) refused on ${refusing}: ${writers.map((r) => r.id).join(", ")}`);
+    notes.push(`proposed writer(s) refused on ${refusing}: ${writers.map((r) => r.id).join(", ")}`);
   }
   // The cap is a fan-out control, not a per-tier one: the static cast is
   // already trimmed, and without re-applying it here `--max-roles 2` on a
@@ -674,20 +862,20 @@ export function mergeProposals(plan: RolePlan, proposed: RoleSpec[], opts: Propo
     }),
   ];
   if (kept.length) {
-    plan.notes.push(`generated specialists: ${kept.map((r) => r.id).join(", ")}`);
+    notes.push(`generated specialists: ${kept.map((r) => r.id).join(", ")}`);
   }
   if (dropped.length) {
-    plan.notes.push(`role cap ${maxRoles}: dropped ${dropped.join(", ")}`);
+    notes.push(`role cap ${maxRoles}: dropped ${dropped.join(", ")}`);
   }
   if (severed.length) {
-    plan.notes.push(`dependency left the plan, role now waits on its remaining deps: ${severed.join(", ")}`);
+    notes.push(`dependency left the plan, role now waits on its remaining deps: ${severed.join(", ")}`);
   }
   // The static pass already reports an exempt overrun; a merge can add a seat
   // after that note was written, so the final cast gets the same sentence.
   if (merged.length > maxRoles) {
-    plan.notes.push(
+    notes.push(
       `role cap ${maxRoles} exceeded: ${merged.length} roles (council members, slice seats and the consul are exempt)`,
     );
   }
-  return { ...plan, roles: merged };
+  return { ...plan, roles: merged, notes };
 }

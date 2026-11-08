@@ -21,7 +21,60 @@
  * single label (`"ReviewerC1"`). The checked set lives inside the picker and
  * never reaches the extension, so it cannot confirm a cast.
  */
-import { grantsWrite, isCouncilMember, SEAT_PURPOSE, type RolePlan, type RoleSpec } from "./core.ts";
+import { baseModel, grantsWrite, isCouncilMember, SEAT_PURPOSE, type RolePlan, type RoleSpec } from "./core.ts";
+
+/**
+ * Council members grouped by the concrete model they answer on.
+ *
+ * A council is only a council when its members answer on different models;
+ * distinct aliases are the request, not the guarantee. Thinking-level variants
+ * of one model are one model. An unresolved `@alias` is not a model, so its
+ * member is left out of every group rather than guessed into one. The consent
+ * question and the plan note both read this, so they cannot disagree.
+ */
+export function councilModelGroups(roles: readonly RoleSpec[]): { members: number; groups: Map<string, string[]> } {
+  const members = roles.filter((r) => isCouncilMember(r.id));
+  const groups = new Map<string, string[]>();
+  for (const member of members) {
+    const concrete = member.modelResolved ?? (member.model.startsWith("@") ? undefined : member.model);
+    if (!concrete) continue;
+    const key = baseModel(concrete);
+    groups.set(key, [...(groups.get(key) ?? []), member.id]);
+  }
+  return { members: members.length, groups };
+}
+
+/**
+ * The preset screen's question: which models are paid for, whether the council
+ * collapses onto fewer models than seats, and who may change the code. It is
+ * the spend decision, so everything that bears on it is in this one line —
+ * plan notes print after the dialog and cannot inform the answer.
+ */
+export function castQuestion(plan: RolePlan): string {
+  const writers = plan.roles.filter((r) => grantsWrite(r.tools)).length;
+  const shells = plan.roles.filter((r) => r.tools.includes("bash")).length;
+  // A shell is wider than an editor's grant — any command, any path — so its
+  // reach is named rather than folded into the writer count.
+  const authority =
+    writers === 0
+      ? "no seat can change the code"
+      : `${writers} of ${plan.roles.length} seat(s) can change the code` +
+        (shells ? `, ${shells} of them with a shell: any command, any path` : "");
+  const { members, groups } = councilModelGroups(plan.roles);
+  // Members left unresolved still collapse when they share one alias: two
+  // reviewers on the same `@slow` are one model whatever it resolves to.
+  const grouped = new Set([...groups.values()].flat());
+  const unresolved = new Set(
+    plan.roles.filter((r) => isCouncilMember(r.id) && !grouped.has(r.id)).map((r) => r.model),
+  );
+  const distinct = groups.size + unresolved.size;
+  const collapse =
+    members > 1 && distinct < members
+      ? ` (${distinct} distinct model${distinct === 1 ? "" : "s"} across ${members} reviewers)`
+      : "";
+  const models = [...new Set(plan.roles.map((r) => r.modelResolved ?? r.model))].join(", ");
+  return `Run ${plan.roles.length} seat(s) on ${models}?${collapse} ${authority}.`;
+}
 
 /** A choice on the preset screen. */
 export type PresetId = "as-planned" | "analysis-only" | "single-reviewer" | "pick-seats";

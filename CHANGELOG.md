@@ -4,6 +4,61 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## 1.7.0
+
+### Fixed — the ledger works on default host settings
+
+- Seat reports, outcomes and fallback notices are now recorded from the seat's
+  own session when it yields (`tool_execution_end` for `yield`). With the
+  host's default `async.enabled`, the parent's `task` result carries no seat
+  results, so the old `tool_result` ledger never fired: read-only reports were
+  never placed, `plan.json` outcomes stayed empty and fallbacks went unreported.
+- Generated definitions set `structured: true`. With the host's default
+  `task.structured` off, seats had no `yield` tool and their `output:` schema
+  was ignored — results came back as a last paragraph, not a full `report`.
+- An aborted seat no longer has its failure text placed as its report.
+  Concurrent seats appending to one `plan.json` no longer lose each other's line.
+- The MCP guard no longer polices hand-written agents (only `rf-*`).
+- A seat's session pins its run when it starts: a newer run (or a nested
+  fleet) reusing the same `rf-*` names no longer receives an older seat's
+  report and outcome. A seat that yields again records a second outcome.
+- Read-only seats can no longer call `role_fleet_plan` (it writes and prunes
+  agent definitions; extension tools reach every seat whatever its grant).
+- The cast question counts two council members on the same unresolved alias as
+  one model.
+- The publish workflow no longer checks the removed `PLUGIN_VERSION` constant.
+
+### Changed — faster runs
+
+- Seats start as soon as their own dependencies have reported instead of
+  waiting for a whole wave: a seat is no longer held behind a slow seat it does
+  not depend on. The dispatch text groups seats by what they wait on, and the
+  plan tool's data carries each seat's `after` (roster names).
+- The reviewer now waits on read-only specialists (security auditor, …) in its
+  plan: it is the seat that checks their findings. The wave barrier used to hide
+  the missing edge; a blind A/B on the per-seat dispatch caught the reviewer
+  reviewing without the audit. A specialist dropped by the role cap no longer
+  leaves a dangling dependency that failed plan validation.
+
+- No `tool_call`/`tool_result` hook in the main session: their presence made the
+  host refuse speculative task launch in every session with the plugin loaded.
+  The MCP guard is installed only inside read-only seat sessions.
+- The main model is told not to copy read-only reports (the plugin places them);
+  it writes one only if the file is missing.
+- A planner wave only for breadth wording; a bare "refactor X" is scout →
+  implementer → tester ∥ reviewer.
+- The single reviewer gating a change runs at medium effort; council, consul,
+  review-only and security asks stay high.
+- `advisor: true` only on the planner (and vision seats), not the implementer.
+- The plan tool's text no longer repeats the cast the dispatch block carries.
+
+### Internal
+
+- `src/run-layout.ts` owns the run tree layout; `src/seats.ts` is the one seat
+  registry (in memory, rebuilt from `plan.json` after a restart).
+- The banner version is read from `package.json`.
+
+
 ## 1.6.0
 
 ### Added — read-only seats lose their MCP tools unless allowed

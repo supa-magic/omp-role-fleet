@@ -9,10 +9,29 @@ import { test } from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { castPresets, filterToSeats, seatRows } from "../src/confirm.ts";
+import { castPresets, castQuestion, filterToSeats, seatRows } from "../src/confirm.ts";
 import { synthesizePlan } from "../src/synthesize.ts";
 import { grantsWrite, isCouncilMember, planWaves } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
+
+test("the cast question counts a council's models, thinking levels and unresolved aliases included", () => {
+  const council = (models: Array<[string, string?]>) => {
+    const plan = synthesizePlan({ task: "review the auth module", cwd: "/tmp", workDir: "/tmp/w", council: models.length });
+    let i = 0;
+    const roles = plan.roles.map((r) => {
+      if (!isCouncilMember(r.id)) return r;
+      const [model, resolved] = models[i++]!;
+      return { ...r, model, ...(resolved ? { modelResolved: resolved } : { modelResolved: undefined }) };
+    });
+    return castQuestion({ ...plan, roles });
+  };
+  // Two members on one unresolved alias are one model, whatever it resolves to.
+  assert.match(council([["@slow"], ["@slow"]]), /\(1 distinct model across 2 reviewers\)/);
+  // A thinking-level suffix is the same model.
+  assert.match(council([["a/m"], ["a/m:high"]]), /\(1 distinct model across 2 reviewers\)/);
+  // Distinct unresolved aliases are not claimed to collapse.
+  assert.ok(!/distinct model/.test(council([["@slow"], ["@task"]])));
+});
 
 function planFor(task: string, extra: Record<string, unknown> = {}) {
   // No default council: a cast is a function of the request, and a fixture that
@@ -219,8 +238,8 @@ test("the review-only preset keeps only seats that can still run", async () => {
   // Authority is three tiers, and this preset has to reason about all of them. A
   // council member used to gain `write` when a
   // consul was appointed, so its report could reach the filesystem; that grant is
-  // gone, because the orchestrator places every read-only seat's report at its
-  // artifact path before the next wave. So there is nothing about a council
+  // gone, because the plugin places every read-only seat's report at its
+  // artifact path when the seat yields. So there is nothing about a council
   // member this preset has to drop — it is read-only like the scout — and the
   // copies below have to say so rather than describing a tier no seat holds.
   //
@@ -322,15 +341,14 @@ test("the review-only preset keeps only seats that can still run", async () => {
   );
   assert.match(build!.description, /no seat can change the code/, build!.description);
 
-  // A cast that does have such a seat still discloses it, by name, on the roster:
-  // the implementer is the only line that can, so the count a reader gets off the
-  // first screen is one and the screen says which seat it is — shell included,
-  // since that is the wider half of its grant.
+  // A cast that does have such seats still discloses them, by name, on the
+  // roster: a bare "refactor the auth module" earns no planner, so implementer
+  // and tester both write, and each line says so — shell included, since that
+  // is the wider half of the grant.
   const buildAsPlanned = castPresets(buildPlan).find((p) => p.id === "as-planned")!;
   const writers = buildAsPlanned.preview.split("\n").filter((l) => writerLine.test(l));
-  assert.equal(writers.length, 1, buildAsPlanned.preview);
-  assert.match(writers[0]!, /^Implementer — /, writers[0]!);
-  assert.match(writers[0]!, /and run commands$/, writers[0]!);
+  assert.deepEqual(writers.map((l) => l.split(" — ")[0]), ["Implementer", "Tester"], buildAsPlanned.preview);
+  for (const line of writers) assert.match(line, /and run commands$/, line);
 });
 
 
