@@ -10,7 +10,7 @@
  * count past the cap.
  */
 import type { Effort, RoleSpec } from "./core.ts";
-import { BUILD_TOOLS, grantsWrite, SEAT_CATALOG, VOCAB } from "./core.ts";
+import { BUILD_TOOLS, grantsWrite, isCouncilMember, isSliceSeat, SEAT_CATALOG, VOCAB } from "./core.ts";
 import { SPECIALISTS } from "./library.ts";
 
 /** One cheap model call; injected so tests run without a provider. */
@@ -62,7 +62,7 @@ function parseRaw(raw: RawRole, declared: Set<string>): RoleSpec | null {
   const mission = validString(raw.mission, 400);
   if (!id || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(id) || !mission) return null;
   const title = validString(raw.title, 80) ?? id;
-  if (BASE_CAST.has(id)) return null; // never overwrite a built-in seat
+  if (isReservedId(id)) return null; // never overwrite or shadow a built-in seat
 
   const acceptance = Array.isArray(raw.acceptance)
     ? raw.acceptance
@@ -129,6 +129,37 @@ const BASE_CAST = new Set([
   ...Object.values(SEAT_CATALOG.base).map((seat) => seat.id),
   ...SPECIALISTS.map((s) => s.spec.id),
 ]);
+
+/** Artifact stems the static tier writes under the run directory
+ *  (`synthesize.ts` draft table, fan-out, council and consul). A proposal's
+ *  artifact is `<id>.md` in the same directory, so an id equal to one of these
+ *  overwrites a static seat's report — the last yield wins. Kept here because
+ *  the static tier hard-codes them inline; a drift test in
+ *  `test/specialists.test.ts` checks every artifact a synthesized cast mints. */
+const STATIC_ARTIFACTS: Record<string, true> = {
+  scout: true,
+  plan: true,
+  implementation: true,
+  "test-report": true,
+  review: true,
+  docs: true,
+  consul: true,
+};
+
+/** Whether a proposed id is the static tier's to mint: a base or catalog seat,
+ *  a library specialist, a seat minted at synthesis time (`reviewer-c<N>`,
+ *  `implementer-<N>`), or an id whose `<id>.md` is a static seat's artifact. */
+function isReservedId(id: string): boolean {
+  return (
+    BASE_CAST.has(id) ||
+    Object.hasOwn(SEAT_CATALOG.catalog, id) ||
+    isCouncilMember(id) ||
+    isSliceSeat(id) ||
+    Object.hasOwn(STATIC_ARTIFACTS, id) ||
+    /^implementation-\d+$/.test(id) ||
+    /^review-c\d+$/.test(id)
+  );
+}
 
 /**
  * Parse and validate a proposal. Returns null on any doubt — the caller treats

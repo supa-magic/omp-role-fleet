@@ -754,6 +754,145 @@ test("a rejected plan is reported as an error and never dispatched", async () =>
   assert.equal(host.sent.length, 0, "a rejected plan must never be dispatched");
 });
 
+/** The plan tool's `execute`, in the shape every tool test drives it. */
+type PlanToolExecute = (
+  id: string,
+  params: Record<string, unknown>,
+  signal: null,
+  onUpdate: null,
+  ctx: unknown,
+) => Promise<{
+  content: Array<{ text: string }>;
+  isError?: boolean;
+  details?: {
+    verdict?: { verdict: string; reason: string; issues: string[] };
+    notes?: string[];
+    roles?: Array<{ id: string; model: string }>;
+    agentDir?: string | null;
+  };
+}>;
+
+test("the plan tool tells the model not to dispatch a declined or refused cast", async () => {
+  // The tool's caller is a model that will dispatch whatever it is handed, so
+  // the two no-run branches must each say so in words and carry the verdict.
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as PlanToolExecute;
+  const run = async (ask: (items: DialogItem[]) => DialogAnswer) => {
+    const dir = await mkdtemp(join(tmpdir(), "rf-tool-confirm-"));
+    const { ctx } = commandCtx(dir, { ask });
+    return execute("id", { task: "fix the auth bug", autoConfirm: false }, null, null, ctx);
+  };
+
+  // A dismissed dialog is a human decision: not dispatched, and not a fault.
+  const dismissed = await run(() => null);
+  assert.notEqual(dismissed.isError, true, "a declined cast is not a tool failure");
+  assert.match(dismissed.content[0]!.text, /^Role run not dispatched\./);
+  assert.match(dismissed.content[0]!.text, /Do not dispatch; report this outcome instead\./);
+  assert.equal(dismissed.details?.verdict?.verdict, "reject");
+  assert.match(dismissed.details?.verdict?.reason ?? "", /abandoned at confirmation/);
+
+  // An empty checklist is the same decline, never "run everything".
+  const unchecked = await run((items) =>
+    items.some((i) => i.id === "seats") ? submit("seats", []) : submit("cast", ["Choose each seat yourself"]),
+  );
+  assert.match(unchecked.content[0]!.text, /^Role run not dispatched\./);
+  assert.match(unchecked.details?.verdict?.reason ?? "", /abandoned at confirmation/);
+
+  // Keeping only a seat whose upstream was unchecked leaves no seat at all:
+  // the re-gate refuses that, and the model is told it was rejected.
+  const orphaned = await run((items) => {
+    const seats = items.find((i) => i.id === "seats");
+    if (!seats) return submit("cast", ["Choose each seat yourself"]);
+    return submit("seats", seats.options.filter((o) => /review/i.test(o.label)).map((o) => o.label));
+  });
+  assert.match(orphaned.content[0]!.text, /^Role plan rejected\./, orphaned.content[0]!.text);
+  assert.match(orphaned.content[0]!.text, /Do not dispatch; report this outcome instead\./);
+  assert.equal(orphaned.details?.verdict?.verdict, "reject");
+  assert.doesNotMatch(orphaned.details?.verdict?.reason ?? "", /abandoned/);
+  assert.equal(host.sent.length, 0, "the tool never dispatches by itself");
+});
+
+test("a host side turn proposes specialists through the sandbox, with no tools and a token cap", async () => {
+  // `makeProposer` is the only bridge from the host's ephemeral turn to the
+  // dynamic tier; a stub that never reaches it leaves the tier untested.
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as PlanToolExecute;
+  const turns: Array<Record<string, unknown>> = [];
+  const run = async (replyText: string) => {
+    const dir = await mkdtemp(join(tmpdir(), "rf-proposer-"));
+    const ctx = {
+      cwd: dir,
+      runEphemeralTurn: async (request: Record<string, unknown>) => {
+        turns.push(request);
+        return { replyText };
+      },
+    };
+    return execute("id", { task: "ask a threat modelling expert to review the auth flow" }, null, null, ctx);
+  };
+
+  const proposal = JSON.stringify([
+    {
+      id: "threat-modeler",
+      title: "Threat modeler",
+      mission: "Map the auth flow's trust boundaries.",
+      acceptance: ["every boundary cites file:line"],
+      tools: ["read", "grep", "glob"],
+      effort: "high",
+      model: "@slow",
+      dependsOn: [],
+    },
+  ]);
+  const accepted = await run(proposal);
+  assert.equal(turns.length, 1, "the proposer must reach the host's side turn exactly once");
+  const [turn] = turns;
+  assert.equal(turn!.tools, false, "the side turn must run with tools disabled");
+  assert.equal(turn!.maxTokens, 800);
+  assert.equal(turn!.minimizeEffort, true);
+  assert.match(String(turn!.promptText), /Reply with ONLY a JSON array/);
+  assert.match(String(turn!.promptText), /Task: ask a threat modelling expert/);
+  const modeler = accepted.details?.roles?.find((r) => r.id === "threat-modeler");
+  assert.ok(modeler, `the sandbox-accepted proposal must join the cast: ${JSON.stringify(accepted.details?.roles)}`);
+  assert.equal(modeler.model, "@slow");
+
+  // A reply the sandbox refuses (a tool outside the grant) keeps the static cast.
+  const refused = await run(proposal.replace('"glob"', '"glob","web_fetch"'));
+  assert.equal(turns.length, 2);
+  assert.ok(!refused.details?.roles?.some((r) => r.id === "threat-modeler"), "a refused proposal must not be seated");
+  assert.ok(
+    refused.details?.notes?.some((n) => n.includes("specialist proposal rejected")),
+    `the refusal must be noted: ${JSON.stringify(refused.details?.notes)}`,
+  );
+});
+
+test("a read-only seat's brief states the MCP grant the operator configured", async () => {
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const execute = host.tools.get("role_fleet_plan")!.execute as PlanToolExecute;
+  const brief = async (seat: string) => {
+    const dir = await mkdtemp(join(tmpdir(), "rf-mcp-brief-"));
+    const result = await execute("id", { task: "fix the auth bug" }, null, null, { cwd: dir });
+    return readFile(join(result.details!.agentDir!, `${seat}.md`), "utf8");
+  };
+  const before = process.env.ROLE_FLEET_MCP_READONLY;
+  try {
+    delete process.env.ROLE_FLEET_MCP_READONLY;
+    assert.match(await brief("rf-scout"), /No MCP tool is available to you: this seat is read-only and the operator allowed none\./);
+
+    process.env.ROLE_FLEET_MCP_READONLY = "mcp__codesearch_,mcp__docs_";
+    const allowed = await brief("rf-scout");
+    assert.match(allowed, /MCP tools are available to you only when their name starts with `mcp__codesearch_`, `mcp__docs_`; any other MCP tool call is refused\./);
+    assert.doesNotMatch(allowed, /No MCP tool is available/);
+
+    // A seat that may write keeps its MCP tools; its brief carries no grant line.
+    assert.doesNotMatch(await brief("rf-implementer"), /MCP tool/);
+  } finally {
+    if (before === undefined) delete process.env.ROLE_FLEET_MCP_READONLY;
+    else process.env.ROLE_FLEET_MCP_READONLY = before;
+  }
+});
+
 
 test("registered surfaces carry the fields omp requires", () => {
   const host = stubHost();
