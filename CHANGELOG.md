@@ -3,8 +3,29 @@
 Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
-
 ## Unreleased
+
+### Fixed — UI casts, run isolation, allowlist pinning
+
+- A designer in a cast with an implementer now waits for the implementer, and
+  the reviewer, council and docs wait for the designer: two writers no longer
+  touch unpartitioned files at once, and review sees every write. The
+  image/render/layout/design/theme words seat a designer only next to a UI
+  word, so "build the docker image in CI" keeps its tester and gets no designer.
+  `render the checkerboard pattern` with no UI word is now a one-scout cast
+  that goes to the dynamic tier.
+- Seat records are keyed by working directory and agent name, so two projects
+  in one process never share a seat's record.
+- A seat's report path read back from `plan.json` must lie inside that run's
+  directory; otherwise no record is built and no report is written.
+- Before emitting, a run checks this tree's manifests and notes an earlier run
+  whose seats still have no outcome, however old it is. This replaces the
+  5-minute-only warning.
+- A blank `allowlist` argument is an absent one: `ROLE_FLEET_ALLOWLIST` still
+  pins the run, and the ignored path is reported.
+- An allowlist chain spreads across a review council only. Seats that share one
+  core (a `--slices` fan-out) all take the chain's first enabled model instead
+  of the second writer falling back to its `@` alias.
 
 ### Changed — flags live at the edges of the command
 

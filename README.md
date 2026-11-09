@@ -63,7 +63,7 @@ text.
 | `--review-only` | Scout + review only — no code changes |
 | `--max-roles N` | Cap generated roles (default 4, min 2, max 8) |
 | `--slices N` | N parallel writer seats (max 4) |
-| `--allowlist FILE` | Pin models via JSON instead of `@` aliases |
+| `--allowlist FILE` | Pin models via JSON instead of `@` aliases (a blank path is ignored — `ROLE_FLEET_ALLOWLIST` applies) |
 
 Examples:
 
@@ -106,9 +106,10 @@ export ROLE_FLEET_ALLOWLIST=~/.omp/agent/role-fleet.json
 | `roles[].chain` | The models for that seat, in preference order — selectors or aliases |
 | `roles[].aliases` | Extra names for that same seat (e.g. `builder` for `implementer`) |
 
-A seat the file does not describe keeps its `@` alias, and the plan says so. Council members
-take the first, second, … model of their seat's chain, so a chain of three distinct models
-gives a council three different models.
+A seat the file does not describe keeps its `@` alias, and the plan says so. A role's `chain`
+spreads across a review council — member N takes the Nth enabled model, so a chain of three
+distinct models gives a council three different models. Seats that share one core (a
+`--slices` fan-out) all take the chain's first enabled model.
 
 ### Confirm the cast
 

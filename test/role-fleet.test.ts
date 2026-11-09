@@ -497,6 +497,76 @@ test("a malformed allowlist entry is refused with its path and index", async () 
   await assert.rejects(() => runRoleFleet({ task: "fix the bug", cwd: dir, allowlist: bad }), /models\[0\]/);
 });
 
+test("a blank allowlist parameter leaves the environment's file in force", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-blank-allowlist-"));
+  const file = join(dir, "fleet.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      models: [{ selector: "env/model", aliases: ["env"] }],
+      roles: [{ role: "scout", chain: ["env"] }],
+    }),
+    "utf8",
+  );
+
+  const previous = process.env.ROLE_FLEET_ALLOWLIST;
+  process.env.ROLE_FLEET_ALLOWLIST = file;
+  try {
+    // A blank value is not nullish, so it used to win over the environment:
+    // the operator's pinned run went out on `@` aliases with nothing said.
+    for (const allowlist of ["", "   "]) {
+      const result = await runRoleFleet({ task: "fix the auth bug", cwd: dir, allowlist, dryRun: true });
+      assert.equal(result.ok, true);
+      assert.equal(
+        result.plan!.roles.find((r) => r.id === "scout")!.model,
+        "env/model",
+        `a blank allowlist (${JSON.stringify(allowlist)}) must not switch the environment's file off`,
+      );
+      assert.ok(
+        result.plan!.notes.some((n) => n.includes("blank path was ignored")),
+        `the ignored path must be reported: ${result.plan!.notes.join(" | ")}`,
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.ROLE_FLEET_ALLOWLIST;
+    else process.env.ROLE_FLEET_ALLOWLIST = previous;
+  }
+});
+
+test("seats that share one core share one model, and the council still spreads", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-shared-seat-"));
+  const file = join(dir, "fleet.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      models: [
+        { selector: "fast/model", aliases: ["fast"] },
+        { selector: "slow/model", aliases: ["slow"] },
+      ],
+      roles: [
+        { role: "implementer", chain: ["fast"] },
+        { role: "reviewer", chain: ["fast", "slow"] },
+      ],
+    }),
+    "utf8",
+  );
+
+  const result = await runRoleFleet({ task: "fix the login bug", cwd: dir, allowlist: file, slices: 2, council: 2 });
+  assert.equal(result.ok, true);
+  const writers = result.plan!.roles.filter((r) => r.core === "implementer");
+  assert.equal(writers.length, 2, `the fan-out must stand: ${result.plan!.roles.map((r) => r.id).join(", ")}`);
+  // The two writer seats are one job split in two: the chain's first model
+  // serves both, and neither falls off the end of a one-model chain onto an
+  // alias the file never named.
+  for (const writer of writers) {
+    assert.equal(writer.model, "fast/model", `${writer.id} must take the seat's first enabled model`);
+  }
+  // The council is several opinions on one thing, so it still spreads.
+  const members = result.plan!.roles.filter((r) => isCouncilMember(r.id));
+  assert.equal(members.length, 2);
+  assert.deepEqual(members.map((m) => m.model), ["fast/model", "slow/model"]);
+});
+
 // ── agent emission ────────────────────────────────────────────────────────────
 
 test("emitted agents are valid omp definitions with alias models", async () => {

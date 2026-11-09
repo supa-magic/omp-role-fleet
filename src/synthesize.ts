@@ -12,7 +12,7 @@
  */
 import { join } from "node:path";
 import type { Capability, RolePlan, RoleSpec } from "./core.ts";
-import { applySpecialists, SPECIALISTS } from "./library.ts";
+import { applySpecialists, isUiTask, SPECIALISTS } from "./library.ts";
 import {
   BUILD_TOOLS,
   DEFAULT_MAX_ROLES,
@@ -145,7 +145,7 @@ interface Intent {
  */
 function classifyIntent(task: string, opts: PlanOptions): Intent {
   const looks = VOCAB.look.test(task) && !(VOCAB.reviewSubject.test(task) && VOCAB.defect.test(task));
-  const migrationShape = SPECIALISTS.some((s) => s.replacesImplementer && s.match.test(task));
+  const migrationShape = SPECIALISTS.some((s) => s.replacesImplementer && s.match(task));
   const changesTree =
     VOCAB.changeStrong.test(task) ||
     (VOCAB.changeAmbiguous.test(task) && !looks) ||
@@ -169,14 +169,14 @@ function classifyIntent(task: string, opts: PlanOptions): Intent {
   // one seat the ask named. A strong verb on a code subject ("add docs to the
   // api module") still asks for both.
   const docsAsk = VOCAB.docs.test(task);
-  const docsOnly =
-    docsAsk && !VOCAB.image.test(task) && (!VOCAB.codeNoun.test(task) || !VOCAB.changeStrong.test(task));
+  const uiTask = isUiTask(task);
+  const docsOnly = docsAsk && !uiTask && (!VOCAB.codeNoun.test(task) || !VOCAB.changeStrong.test(task));
   /** The docs seat writes when asked for documentation, or when there is a
    *  delivered change to document; it reads when the ask is to find out. */
   const docsWrites = docsAsk || changesTree;
   const wantsCode = changesTree && !docsOnly && !verifyAsk;
   const wantsPlan = wantsCode && VOCAB.multiFile.test(task);
-  const needsVision = VOCAB.image.test(task);
+  const needsVision = uiTask;
 
   // Analysis intent: the task asks to look, not to change. Two sources, and the
   // first is structural rather than lexical — asking for a council, naming the

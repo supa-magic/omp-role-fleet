@@ -89,8 +89,23 @@ const CASES: CastRow[] = [
   },
   {
     task: "render the checkerboard pattern",
+    expected: ["scout"],
+    why: "`render` alone names no surface — a server render, a template render, a scene render — so it is no longer a UI ask: no change verb and no UI word leaves the degenerate cast, which is exactly what hands an ambiguous ask to the dynamic tier instead of guessing a write-granted designer",
+  },
+  {
+    task: "render the checkerboard pattern on the page",
     expected: ["scout", "designer"],
-    why: "a UI ask with no change verb: the designer *is* the cast, and no tester is minted for it",
+    why: "the same `render` beside a surface word (`page`) is UI work with no change verb: the designer *is* the cast, and no tester is minted for it",
+  },
+  {
+    task: "build the docker image in CI",
+    expected: ["scout", "implementer", "tester", "reviewer"],
+    why: "`image` with no surface word is a container image, not a UI: no designer, and the tester the UI rule would have spent stays",
+  },
+  {
+    task: "fix the login page css bug",
+    expected: ["scout", "implementer", "reviewer", "designer"],
+    why: "`css` names a UI outright: the designer takes the tester's seat, and runs after the implementer rather than beside it (pinned in the specialist tests)",
   },
   {
     task: "design a new onboarding flow",

@@ -24,7 +24,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { baseModel, type RunOutcome } from "./core.ts";
 import { observeSeat, plannedModel, type ModelObservation } from "./model-observed.ts";
-import { notify, type SeatRecord } from "./seats.ts";
+import { artifactInsideRun, notify, type SeatRecord } from "./seats.ts";
 
 /** The report and verdict a seat yielded in pieces. */
 export interface SeatSections {
@@ -192,6 +192,11 @@ export async function settleSeat(input: SeatYield): Promise<SettleResult> {
     const body = text(report);
     if (!body) {
       failure = "seat yielded no report";
+    } else if (!(await artifactInsideRun(dirname(record.manifestPath), record.artifact))) {
+      // The report goes where the run directory says, and nowhere else: a path
+      // outside it came from a manifest someone edited, and writing there would
+      // put a seat's report outside the tree that owns it.
+      failure = `report path ${record.artifact} is outside the run directory`;
     } else {
       try {
         await mkdir(dirname(record.artifact), { recursive: true });

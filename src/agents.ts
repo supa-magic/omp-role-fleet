@@ -12,11 +12,11 @@
  */
 import type { Dirent } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type { RolePlan, RoleSpec, RunOutcome, TaskEffort } from "./core.ts";
 import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves, taskEffort } from "./core.ts";
 import { isReadOnlyToolset, mcpAllowlistFromEnv } from "./mcp-policy.ts";
-import { MANIFEST_FILE, RUN_ID, runIdAt } from "./run-layout.ts";
+import { MANIFEST_FILE, RUN_ID, manifestPath, runIdAt, runsRoot } from "./run-layout.ts";
 import { GENERATED_MARKER, RUN_MARKER } from "./seats.ts";
 
 /** How recent a foreign run must be for its files to plausibly still be in use.
@@ -33,6 +33,26 @@ function recentlyActive(owner: string | undefined, currentRunId: string | undefi
 
 function runStamp(runId: string | undefined): string {
   return `<!-- role-fleet:run ${runId ?? "run-0"} -->`;
+}
+
+/**
+ * Is this foreign run plausibly still dispatching?
+ *
+ * The manifest is the authority: a run whose seats have all produced an
+ * outcome is finished, however long ago it ran, and a run whose seats never
+ * settled may still be dispatching, however long ago that was. A run with no
+ * readable manifest is judged by age instead — it is the older warning, and
+ * it is all there is to go on.
+ */
+function inFlight(
+  owner: string | undefined,
+  currentRunId: string | undefined,
+  unsettled: ReadonlyMap<string, string[]>,
+): boolean {
+  if (!owner || owner === currentRunId) return false;
+  const open = unsettled.get(owner);
+  if (open) return open.length > 0;
+  return recentlyActive(owner, currentRunId);
 }
 
 // `AGENT_PREFIX` is defined once in core.ts: the settled-result observer
@@ -545,6 +565,7 @@ export function resolveSeatNames(
   plan: RolePlan,
   existing: Map<string, SeatFileState>,
   seats: readonly RoleSpec[] = planWaves(plan.roles).flat(),
+  unsettled: ReadonlyMap<string, string[]> = new Map(),
 ): SeatNameResolution {
   const names: string[] = [];
   const notes: string[] = [];
@@ -573,8 +594,8 @@ export function resolveSeatNames(
     // created, and `pruneGeneratedAgents` already removes the link, not the target.
     if (baseBody !== undefined && !state.isLink && oursToReplace(baseBody, baseFile, plan.runId)) {
       const owner = baseBody.match(RUN_MARKER)?.[1];
-      if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
-        replacedForeign.push(`${baseFile} (${owner})`);
+      if (inFlight(owner, plan.runId, unsettled)) {
+        replacedForeign.push(`${baseFile} (${owner!})`);
       }
       names.push(base);
       continue;
@@ -595,8 +616,8 @@ export function resolveSeatNames(
       const body = candidateState?.body;
       if (body === undefined || !oursToReplace(body, candidate, plan.runId)) continue;
       const owner = body.match(RUN_MARKER)?.[1];
-      if (owner && owner !== plan.runId && recentlyActive(owner, plan.runId)) {
-        replacedForeign.push(`${candidate} (${owner})`);
+      if (inFlight(owner, plan.runId, unsettled)) {
+        replacedForeign.push(`${candidate} (${owner!})`);
       }
       as = `${base}-${n}`;
     }
@@ -632,6 +653,67 @@ export function resolveSeatNames(
   }
 
   return { names, notes };
+}
+
+/**
+ * Every run of this tree whose manifest could be read, and the seats of it
+ * that never produced an outcome.
+ *
+ * A manifest lists the seats a run emitted and the outcomes they produced. A
+ * seat with no outcome never settled: the run may still be dispatching, and
+ * its agent definitions are the ones the next run is about to replace. Age
+ * says nothing about that — a run from an hour ago whose seat never yielded
+ * is as live as one from a minute ago — so the manifest decides, not the
+ * clock.
+ *
+ * A run with a readable manifest and no pending seat is in the map with an
+ * empty list: the difference between "settled" and "unreadable" is the whole
+ * point, and collapsing them would make a lost manifest look like a finished
+ * run.
+ *
+ * Only the runs that wrote their agent files into `dir` are this tree's: a
+ * manifest elsewhere on the disk says nothing about the files here.
+ */
+export async function unsettledRuns(cwd: string, dir: string): Promise<Map<string, string[]>> {
+  const pending = new Map<string, string[]>();
+  let entries: string[];
+  try {
+    entries = await readdir(runsRoot(cwd));
+  } catch {
+    return pending;
+  }
+  const here = resolve(dir);
+  for (const runId of entries.filter((name) => RUN_ID.test(name))) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(manifestPath(cwd, runId), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const manifest: Record<string, unknown> = { ...parsed };
+    const seats = Array.isArray(manifest.agents) ? manifest.agents : [];
+    const mine = seats.some((seat) => {
+      if (!seat || typeof seat !== "object" || !("path" in seat) || typeof seat.path !== "string") return false;
+      const rel = relative(here, resolve(seat.path));
+      return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== "..";
+    });
+    if (!mine) continue;
+    const outcomes = Array.isArray(manifest.outcomes) ? manifest.outcomes : [];
+    const settled = new Set<string>();
+    for (const outcome of outcomes) {
+      if (outcome && typeof outcome === "object" && "agent" in outcome && typeof outcome.agent === "string") {
+        settled.add(outcome.agent);
+      }
+    }
+    const open: string[] = [];
+    for (const seat of seats) {
+      if (!seat || typeof seat !== "object" || !("agent" in seat) || typeof seat.agent !== "string") continue;
+      if (!settled.has(seat.agent)) open.push(seat.agent);
+    }
+    pending.set(runId, open);
+  }
+  return pending;
 }
 
 /**
@@ -705,7 +787,10 @@ export async function emitAgents(
   const seats = waves.flat();
 
   const existing = await readSeatFiles(dir, seats);
-  const resolution = resolveSeatNames(plan, existing, seats);
+  // The runs of this tree that never settled: their seats may still be
+  // dispatching, and this run is about to take their names.
+  const unsettled = await unsettledRuns(plan.cwd, dir);
+  const resolution = resolveSeatNames(plan, existing, seats, unsettled);
   if (resolution.conflict) {
     throw new Error(
       `${resolution.conflict} is not this run's to replace, and ${dir} holds a hundred names based on it — move them out of the way and re-run`,
@@ -735,6 +820,17 @@ export async function emitAgents(
 
   const notes = [...resolution.notes];
 
+  // A run that never settled may still be dispatching, and this run is about
+  // to take its seat names. The manifest says so, whatever the run's age.
+  const stale = [...unsettled.entries()]
+    .filter(([runId, open]) => runId !== plan.runId && open.length > 0)
+    .sort((a, b) => runIdAt(b[0]) - runIdAt(a[0]))[0];
+  if (stale) {
+    notes.push(
+      `run ${stale[0]} still has ${stale[1].length} seat(s) without an outcome (${stale[1].join(", ")}); this run replaces their agent files — concurrent role-fleet runs in one working tree are not supported — use a worktree`,
+    );
+  }
+
   await Promise.all(
     emitted.map(async (a) => {
       const role = plan.roles.find((r) => r.id === a.role)!;
@@ -747,7 +843,7 @@ export async function emitAgents(
     emitted.map((a) => `${a.agent}.md`),
     plan.runId,
     (path, owner) => {
-      if (!recentlyActive(owner, plan.runId)) return;
+      if (!inFlight(owner, plan.runId, unsettled)) return;
       notes.push(
         `removed agent file ${path} owned by ${owner}; concurrent role-fleet runs in one working tree are not supported — use a worktree`,
       );
