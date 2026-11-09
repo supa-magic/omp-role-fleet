@@ -118,7 +118,7 @@ The plugin writes every seat's full report to its artifact path when the seat yi
 
 ## Speed
 
-- The plugin registers no `tool_call`/`tool_result` hook in your main session: the host turns off speculative task launch wherever an extension holds one. The read-only MCP guard is installed only inside read-only `rf-*` seat sessions.
+- The plugin registers no `tool_call`/`tool_result` hook in your main session: the host turns off speculative task launch wherever an extension holds one. The MCP guard is installed only inside `rf-*` seat sessions.
 - Planning (cast, gate, emit) takes a few milliseconds; a run's wall clock is its critical path of seats. Each seat starts as soon as the seats it depends on have reported — never held behind an unrelated slow seat. A planner is added only for breadth wording (`across`, `several files`, `migrate`, `codemod`, …), and the single reviewer that gates a change runs at medium effort (council, consul, review-only and security asks stay high).
 - Per-seat `effort` reaches the host only with `task.enableEffort` on.
 
@@ -153,6 +153,9 @@ Artifacts and `plan.json` live under `.role-fleet/` (gitignored; newest 10 kept)
 - Tool grants are pinned per seat; shell only on implementer/tester-class seats.
 - Generated agents are `rf-*` only; hand-written agents are never touched, and
   only `rf-*` files are ever pruned or replaced.
+- No seat may plan a nested fleet: `role_fleet_plan` is refused in every `rf-*`
+  session, because a nested plan rewrites the definitions of seats that have
+  not started yet.
 - Task text never enters frontmatter.
 - **Read-only seats get no MCP tools by default.** omp gives every seat every
   connected MCP tool (a `tools:` list covers built-ins only), mints MCP tools

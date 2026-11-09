@@ -189,12 +189,13 @@ export async function settleSeat(input: SeatYield): Promise<SettleResult> {
   let written: string | undefined;
   let failure: string | undefined;
   if (!aborted) {
-    if (!text(report)) {
+    const body = text(report);
+    if (!body) {
       failure = "seat yielded no report";
     } else {
       try {
         await mkdir(dirname(record.artifact), { recursive: true });
-        await writeFile(record.artifact, report!.endsWith("\n") ? report! : `${report!}\n`, "utf8");
+        await writeFile(record.artifact, body.endsWith("\n") ? body : `${body}\n`, "utf8");
         written = record.artifact;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);

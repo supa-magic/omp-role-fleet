@@ -3,8 +3,8 @@
  *
  * The manifest is the durable record; this module only renders it. It is
  * deliberately read-only and tolerant: an older run has no `outcomes`, a
- * truncated manifest is skipped rather than breaking the list, and a missing
- * field is printed as unknown instead of invented.
+ * truncated manifest is skipped rather than breaking the list or the status,
+ * and a missing field is printed as unknown instead of invented.
  */
 import type { Dirent } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
