@@ -126,13 +126,30 @@ test("a hand-written agent is never policed, whatever its grant", () => {
   assert.equal(verdict.block, false);
 });
 
-test("an unknown seat is left alone rather than guessed at", () => {
+test("a seat whose grant cannot be read is guarded, not trusted", () => {
+  // Fail closed: a run record that is gone and a definition that says nothing
+  // leave nothing to prove the seat may not write. Leaving it alone is how a
+  // "read-only" seat ends up holding every connected MCP tool.
   const verdict = mcpGuardVerdict({
     toolName: "mcp__linear_create_issue",
     agentKind: "sub",
     agentName: "rf-scout",
     seatTools: undefined,
     allowlist: [],
+  });
+  assert.equal(verdict.block, true);
+  assert.match(verdict.reason ?? "", /rf-scout/);
+  assert.match(verdict.reason ?? "", /ROLE_FLEET_MCP_READONLY/);
+});
+
+test("an allowed MCP tool passes even when the grant cannot be read", () => {
+  // The operator allowed the tool by name: that is the way through the guard.
+  const verdict = mcpGuardVerdict({
+    toolName: "mcp__codesearch_search",
+    agentKind: "sub",
+    agentName: "rf-scout",
+    seatTools: undefined,
+    allowlist: ["mcp__codesearch_"],
   });
   assert.equal(verdict.block, false);
 });

@@ -17,13 +17,13 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@o
 import { runRoleFleet, type RunOptions, type RunResult } from "./pipeline.ts";
 import { MAX_COUNCIL, MAX_MODELS, MAX_ROLES, parseFlags, type Flags } from "./flags.ts";
 import { dispatchPlan, renderDispatch, renderVerdict, renderPlan } from "./render.ts";
-import { settleSeat } from "./ledger.ts";
+import { sectionFields, settleSeat, type SeatSections } from "./ledger.ts";
 import { renderRunList, renderRunReport, renderRunStatus } from "./report.ts";
 import { castPresets, castQuestion, seatRows } from "./confirm.ts";
 import { AGENT_PREFIX, DEFAULT_MAX_ROLES, MAX_SLICES, planWaves, type RolePlan } from "./core.ts";
 import { renderObservation } from "./model-observed.ts";
-import { isMcpToolName, isReadOnlyToolset, mcpAllowlistFromEnv, mcpGuardVerdict } from "./mcp-policy.ts";
-import { clearNotifier, notify, seatRecord, setNotifier, type SeatRecord } from "./seats.ts";
+import { isMcpToolName, mcpAllowlistFromEnv, mcpGuardVerdict, seatMayWrite } from "./mcp-policy.ts";
+import { clearNotifier, notify, seatRecord, seatToolsFromDefinition, setNotifier, type SeatRecord } from "./seats.ts";
 import type { RoleProposer } from "./generate.ts";
 
 /** The published version, read from the manifest that ships beside `src/`. */
@@ -369,8 +369,19 @@ export default function roleFleet(pi: ExtensionAPI): void {
   // re-points the registry, but this session still belongs to the run that
   // started it.
   let seat: SeatRecord | undefined;
+  // The seat's clock: started with its first prompt, cleared by the yield that
+  // ends it. A retry starts the seat again, and that continuation must not
+  // restart the clock or the fallback history.
   let seatStartedAt: number | undefined;
-  let fallbackFrom: string | undefined;
+  // The seat's own model, remembered at its first prompt. A retry fallback —
+  // the seat's or an advisor's — fires the same event in this session, so
+  // only the seat's model changing tells the two apart.
+  let seatModel: string | undefined;
+  // The report a seat yielded in pieces, folded as its sections arrive.
+  const sections: SeatSections = {};
+  // The MCP guard goes in once per session: the host may start the seat again,
+  // and a second guard would stack on the first.
+  let guardInstalled = false;
   const isSeatSession = (ctx: ExtensionContext): ctx is ExtensionContext & { agent: { kind: "sub"; name: string } } =>
     ctx.agent?.kind === "sub" && ctx.agent.name.startsWith(AGENT_PREFIX);
 
@@ -396,25 +407,36 @@ export default function roleFleet(pi: ExtensionAPI): void {
   // here would slow every task batch the user runs, fleet or not.
   pi.on("agent_start", async (_event, ctx) => {
     if (!isSeatSession(ctx)) return;
-    // Each prompt of the seat starts its clock and its fallback history afresh,
-    // so a revived seat reports its own run, not the idle time before it.
-    seatStartedAt = Date.now();
-    fallbackFrom = undefined;
-    if (seat) return;
-    seat = await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined);
-    if (!seat || !isReadOnlyToolset(seat.tools)) return;
-    const tools = seat.tools;
+    // The clock starts with the seat's first prompt and is cleared by the yield
+    // that ends it: a retry continues the same seat, and must not restart the
+    // elapsed time or forget the model it started on.
+    seatStartedAt ??= Date.now();
+    seatModel ??= ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+    if (guardInstalled) return;
+    seat ??= await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined);
+    // The seat's grant: the run's record first, the seat's own definition file
+    // second. A seat whose run directory is gone still says what it may do.
+    const tools = seat?.tools ?? (await seatToolsFromDefinition(ctx.agent.name, ctx.cwd).catch(() => undefined));
+    // A seat that may write keeps its MCP tools; the guard would buy nothing.
+    if (seatMayWrite(tools)) return;
+    // Fail closed: a seat whose grant cannot be read is not a seat that may
+    // call every MCP tool the host hands it. The guard goes in, and it refuses
+    // every MCP call outside the allowlist.
+    guardInstalled = true;
+    const seatName = ctx.agent.name;
     // A definition's `tools:` list governs built-ins only, and MCP tools stay
     // additive — so a seat the consent screen called read-only still holds every
     // connected MCP tool. The host mints MCP tools write-tier and runs subagents
-    // unattended, so a read-only seat may call only the MCP tools the operator
-    // allowed by name. Installed here, in this seat's session alone.
-    pi.on("tool_call", (event, toolCtx) => {
+    // unattended, so a seat that may not write may call only the MCP tools the
+    // operator allowed by name. Installed here, in this seat's session alone.
+    pi.on("tool_call", (event) => {
       if (!isMcpToolName(event.toolName)) return;
       const verdict = mcpGuardVerdict({
         toolName: event.toolName,
-        agentKind: toolCtx.agent?.kind ?? "main",
-        agentName: toolCtx.agent?.name ?? "",
+        // The session is the seat's own: its identity is not read from the
+        // tool call, which may carry none.
+        agentKind: "sub",
+        agentName: seatName,
         seatTools: tools,
         allowlist: mcpAllowlistFromEnv(process.env),
       });
@@ -422,26 +444,44 @@ export default function roleFleet(pi: ExtensionAPI): void {
     });
   });
 
-  pi.on("retry_fallback_applied", (event, ctx) => {
-    if (!isSeatSession(ctx)) return;
-    fallbackFrom ??= event.from;
-  });
-
   // A seat's yield is the one place its full report and the model that produced
   // it are both in hand, whether the parent runs seats as background jobs (the
   // host default, whose `task` result carries no seat results) or inline.
   pi.on("tool_execution_end", async (event, ctx) => {
     if (event.toolName !== "yield" || event.isError || !isSeatSession(ctx)) return;
+    const details =
+      typeof event.result === "object" && event.result !== null && "details" in event.result
+        ? event.result.details
+        : undefined;
+    // An incremental section is not the seat's result: the host assembles the
+    // sections after the last one. Keep it — the terminal yield can arrive
+    // with no data at all, and the report would be lost with it.
+    const section = sectionFields(details);
+    if (section) {
+      Object.assign(sections, section);
+      return;
+    }
     seat ??= await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined);
     if (!seat) return;
-    const { result } = event;
+    const ran = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+    // A fallback is the seat's own model changing. An advisor's fallback fires
+    // the same event in the same session and leaves the seat's model alone, so
+    // counting the event would blame the seat for the advisor's swap.
+    const fellBack = ran !== undefined && seatModel !== undefined && ran !== seatModel;
     const { observation } = await settleSeat({
       record: seat,
-      details: typeof result === "object" && result !== null && "details" in result ? result.details : undefined,
-      ...(ctx.model ? { ran: `${ctx.model.provider}/${ctx.model.id}` } : {}),
-      ...(fallbackFrom ? { fallbackFrom } : {}),
+      details,
+      sections,
+      ...(ran ? { ran } : {}),
+      ...(fellBack && seatModel ? { fallbackFrom: seatModel } : {}),
       ...(seatStartedAt !== undefined ? { durationMs: Date.now() - seatStartedAt } : {}),
     });
+    // The seat's next prompt starts a fresh clock, a fresh baseline model and
+    // a fresh set of sections.
+    seatStartedAt = undefined;
+    seatModel = undefined;
+    delete sections.report;
+    delete sections.verdict;
     if (observation) notify(renderObservation(observation), observation.fallback ? "warning" : "info");
   });
 
@@ -606,17 +646,19 @@ export default function roleFleet(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: Flags & { task: string; autoConfirm?: boolean }, _signal, _onUpdate, ctx) {
       try {
         // The tool writes and prunes `.omp/agents/rf-*` and run trees, and
-        // extension tools reach every seat regardless of its `tools:` grant. A
-        // read-only seat must not gain that write — nor rewrite the definitions
-        // of seats in its own run that have not started yet.
+        // extension tools reach every seat regardless of its `tools:` grant. No
+        // seat may plan a fleet: a nested plan would rewrite the definitions of
+        // the seats in its own run that have not started yet.
         if (isSeatSession(ctx)) {
-          const caller = seat ?? (await seatRecord(ctx.agent.name, ctx.cwd).catch(() => undefined));
-          if (caller && isReadOnlyToolset(caller.tools)) {
-            return {
-              content: [{ type: "text" as const, text: `role_fleet_plan is not available to the read-only seat \`${ctx.agent.name}\`: it writes agent definitions and run files.` }],
-              isError: true,
-            };
-          }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `role_fleet_plan is not available to the seat \`${ctx.agent.name}\`: it writes agent definitions and run files.`,
+              },
+            ],
+            isError: true,
+          };
         }
         const progress = startProgress(ctx, ctx.ui, "role-fleet: choosing the cast…");
         let result: RunResult;
@@ -662,8 +704,8 @@ export default function roleFleet(pi: ExtensionAPI): void {
           content: [{ type: "text" as const, text }],
           // The model gets the same batches the markdown renders, as data:
           // wave boundaries, roster names (including `-2` renames), artifacts,
-          // dependencies and the read-only placement contract. Parsing prose
-          // for these is how a dispatch loses a seat or runs a wave twice.
+          // dependencies and each seat's write authority. Parsing prose for
+          // these is how a dispatch loses a seat or runs a wave twice.
           details: {
             runId: result.plan.runId,
             verdict: result.verdict,

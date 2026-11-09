@@ -131,6 +131,35 @@ const BASE_CAST = new Set([
 ]);
 
 /**
+ * Whether the proposal's own dependencies form a cycle, or a role depends on
+ * itself.
+ *
+ * A dependency on a static-cast seat is a leaf here: the static cast has its
+ * own shape, and the proposal only adds to it. A cycle among the proposed
+ * roles, though, is a plan that can never be scheduled — the seats would wait
+ * on each other, and the core's conflict wave would ship briefs pointing at
+ * artifacts nobody ever writes.
+ */
+function hasDependencyCycle(roles: readonly RoleSpec[]): boolean {
+  const byId = new Map(roles.map((role) => [role.id, role]));
+  const open = new Set<string>();
+  const done = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (open.has(id)) return true;
+    if (done.has(id)) return false;
+    open.add(id);
+    for (const dep of byId.get(id)?.dependsOn ?? []) {
+      if (!byId.has(dep)) continue;
+      if (visit(dep)) return true;
+    }
+    open.delete(id);
+    done.add(id);
+    return false;
+  };
+  return roles.some((role) => visit(role.id));
+}
+
+/**
  * Parse and validate a proposal. Returns null on any doubt — the caller treats
  * that as "keep the static cast", never as an error worth surfacing.
  */
@@ -171,6 +200,10 @@ export function parseProposal(reply: string): RoleSpec[] | null {
     if (!role) return null; // one bad element invalidates the whole proposal
     roles.push(role);
   }
+  // A cycle among the proposed roles — or a role that waits on itself — is a
+  // plan that can never run. Refused whole, like every other broken
+  // constraint here.
+  if (hasDependencyCycle(roles)) return null;
   return roles;
 }
 

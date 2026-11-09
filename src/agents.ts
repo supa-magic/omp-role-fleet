@@ -11,7 +11,7 @@
  * rewriting the same names, and stale generated files are pruned.
  */
 import type { Dirent } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { RolePlan, RoleSpec, RunOutcome, TaskEffort } from "./core.ts";
 import { AGENT_PREFIX, grantsWrite, SEAT_PURPOSE, planWaves, taskEffort } from "./core.ts";
@@ -256,11 +256,9 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
     .map((d) => {
       const dep = plan.roles.find((r) => r.id === d);
       if (!dep) return null;
-      // A read-only dep cannot write its own artifact, but the path is still where
-      // the report belongs: the plugin places it there when the seat yields.
-      return grantsWrite(dep.tools)
-        ? `- \`${dep.id}\` → ${dep.artifact}`
-        : `- \`${dep.id}\` → ${dep.artifact} (read-only role — the plugin writes its report here)`;
+      // The path is where the upstream seat's report belongs: the plugin places
+      // every seat's report there when it yields, whatever the seat's grant.
+      return `- \`${dep.id}\` → ${dep.artifact} (placed by the plugin)`;
     })
     .filter(Boolean)
     .join("\n");
@@ -322,11 +320,12 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
     "- One writer per file; never edit files owned by another role in this plan.",
     "- Do not expand scope. Smallest correct change.",
     "- Report blockers with evidence. Never invent APIs or claim a check you did not run.",
+    // The plugin places every seat's report, writer seats included: a writer's
+    // own write to the run directory is refused by the host sandbox, so a brief
+    // that orders it produces a seat with no report at all.
     ...(grantsWrite(role.tools)
-      ? [`- Write your report to \`${role.artifact}\` as well as yielding it: the full report, not a summary.`]
-      : [
-          `- You have no write access. Yield your full report — the plugin writes it to \`${role.artifact}\`.`,
-        ]),
+      ? [`- Yield your full report — the plugin writes it to \`${role.artifact}\`.`]
+      : [`- You have no write access. Yield your full report — the plugin writes it to \`${role.artifact}\`.`]),
     "",
   ].join("\n");
 }
@@ -351,13 +350,13 @@ export interface EmittedAgent {
   /** The built-in grant the definition pins; the MCP guard judges against it. */
   tools: string[];
   /**
-   * Whether the seat can write its own artifact.
+   * Whether the seat's grant lets it change files.
    *
-   * False means the plugin places that file when the seat yields, and the
-   * dispatch prompt names it so the main model can fill a gap if the seat
-   * failed to yield.
+   * The plugin places every seat's report from its yield — a writer's own write
+   * to the run directory is refused by the host sandbox — so this says what
+   * the seat could do, not who writes the artifact.
    */
-  writesOwnReport: boolean;
+  mayWrite: boolean;
 }
 
 /**
@@ -381,9 +380,12 @@ function declaredName(body: string): string {
  *
  * One predicate, two callers, opposite ends of the same invariant: `emitAgents`
  * overwrites exactly the files `pruneGeneratedAgents` deletes, and clobbers
- * nothing prune would spare. It is false for three kinds of file, each for its
+ * nothing prune would spare. It is false for four kinds of file, each for its
  * own reason:
  *
+ *  - a name outside this plugin's namespace — the file is the user's, whatever
+ *    it carries. A copy of a generated seat renamed `my-reviewer.md` is a
+ *    hand-written agent from here on.
  *  - no `GENERATED_MARKER` — a hand-written agent. `emitAgents` used to write
  *    over it unconditionally, which lost user content and then *deleted* it on a
  *    later run, since by then it carried the marker and matched its filename.
@@ -397,6 +399,9 @@ function declaredName(body: string): string {
  * a digit-count boundary.
  */
 function oursToReplace(body: string, entry: string, currentRunId?: string): boolean {
+  // The name is the plugin's: a file under any other name is the user's, even
+  // when it carries the generated marker.
+  if (!entry.startsWith(AGENT_PREFIX)) return false;
   if (!body.includes(GENERATED_MARKER)) return false;
   const declared = declaredName(body);
   if (!declared || `${declared}.md` !== entry) return false;
@@ -427,6 +432,9 @@ export async function pruneGeneratedAgents(
   const removed: string[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".md")) continue;
+    // Only this plugin's own names are ever pruned: a copy of a generated seat
+    // under another name carries the marker but is the user's file.
+    if (!entry.startsWith(AGENT_PREFIX)) continue;
     if (keepSet.has(entry)) continue;
     const target = join(dir, entry);
     try {
@@ -713,7 +721,7 @@ export async function emitAgents(
         effort: taskEffort(role.effort),
         artifact: role.artifact,
         dependsOn: [...(role.dependsOn ?? [])],
-        writesOwnReport: grantsWrite(role.tools),
+        mayWrite: grantsWrite(role.tools),
         tools: [...role.tools],
       });
     }
@@ -768,11 +776,17 @@ export interface RunManifest {
  * model-observation baseline in process memory — both gone by the next session —
  * so a finished run could not be audited at all. This is that record, written
  * where the artifacts already are.
+ *
+ * Written through a temp file and a rename: the first record of a run is the
+ * one a reader may arrive while it is being written, and a half-written
+ * manifest is an unreadable one.
  */
 export async function writeRunManifest(workDir: string, manifest: RunManifest): Promise<string> {
   await mkdir(workDir, { recursive: true });
   const path = join(workDir, MANIFEST_FILE);
-  await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeFile(temp, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await rename(temp, path);
   return path;
 }
 
