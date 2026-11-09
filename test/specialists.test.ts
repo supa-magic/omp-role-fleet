@@ -355,7 +355,7 @@ test("a proposal whose dependencies form a cycle is refused whole", () => {
   // the seats would wait on each other, and the conflict wave would ship
   // briefs pointing at artifacts nobody ever writes.
   const role = (id: string, dependsOn: string[]) =>
-    JSON.stringify([
+    JSON.stringify({ intent: "analysis", roles: [
       {
         id,
         title: id,
@@ -366,8 +366,8 @@ test("a proposal whose dependencies form a cycle is refused whole", () => {
         model: "@slow",
         dependsOn,
       },
-    ]);
-  const pair = JSON.stringify([
+    ] });
+  const pair = JSON.stringify({ intent: "analysis", roles: [
     {
       id: "x-alpha",
       title: "A",
@@ -388,11 +388,11 @@ test("a proposal whose dependencies form a cycle is refused whole", () => {
       model: "@slow",
       dependsOn: ["x-alpha"],
     },
-  ]);
+  ] });
   assert.equal(parseProposal(pair), null, "a dependency cycle must be refused");
   assert.equal(parseProposal(role("x-self", ["x-self"])), null, "a self-dependency must be refused");
   // A dependency on a static-cast seat is a leaf, not a cycle.
-  assert.equal(parseProposal(role("x-leaf", ["scout"]))?.length, 1);
+  assert.equal(parseProposal(role("x-leaf", ["scout"]))?.roles.length, 1);
 });
 
 test("a grant that mixes a real tool with a rogue one is refused whole", () => {
