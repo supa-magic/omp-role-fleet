@@ -427,8 +427,8 @@ export default function roleFleet(pi: ExtensionAPI): void {
     // A definition's `tools:` list governs built-ins only, and MCP tools stay
     // additive — so a seat the consent screen called read-only still holds every
     // connected MCP tool. The host mints MCP tools write-tier and runs subagents
-    // unattended, so a read-only seat may call only the MCP tools the operator
-    // allowed by name. Installed here, in this seat's session alone.
+    // unattended, so a seat that may not write may call only the MCP tools the
+    // operator allowed by name. Installed here, in this seat's session alone.
     pi.on("tool_call", (event) => {
       if (!isMcpToolName(event.toolName)) return;
       const verdict = mcpGuardVerdict({

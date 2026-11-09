@@ -42,7 +42,7 @@ export interface SeatYield {
   sections?: SeatSections;
   /** The session's live model (`provider/id`) at the yield. */
   ran?: string;
-  /** The model a retry fallback replaced, when one was applied in this session. */
+  /** The seat's model before its own retry fallback replaced it. */
   fallbackFrom?: string;
   durationMs?: number;
 }
