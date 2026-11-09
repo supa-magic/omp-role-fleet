@@ -492,7 +492,11 @@ export default function roleFleet(pi: ExtensionAPI): void {
       // Safety net: a command that throws is rendered by the host as an opaque
       // "Extension command error". The user only ever sees an actionable message.
       try {
-        const words = args.trim().split(/\s+/).filter(Boolean);
+        // The command as the user typed it: the flags are read from its two
+        // edges and the task is rebuilt from what is left, so the line breaks
+        // and the spacing they wrote survive.
+        const command = args.trim();
+        const words = command.split(/\s+/).filter(Boolean);
         // The word alone, never as the first word of a task: "version the api
         // endpoints" is work to plan, and reading it as the version subcommand
         // made that task unplannable with no way to say so.
@@ -530,7 +534,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
           return;
         }
 
-        const { flags, task, problems } = parseFlags(words);
+        const { flags, task, problems } = parseFlags(command);
         for (const p of problems) ctx.ui.notify(p, "warning");
         if (!task) {
           ctx.ui.notify(
