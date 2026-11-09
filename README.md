@@ -44,6 +44,12 @@ Watch agents live with **Alt+A** (Agent Hub).
 
 ### Flags
 
+Flags go **before** the task or **after** it — never in the middle of it. A
+flag-shaped word inside the task is task text: `/role-fleet add a --dry-run
+flag to the deploy script` is a task about a flag, not a dry run with the words
+cut out of it. `--` ends the flags outright, and everything after it is task
+text.
+
 | Flag | Effect |
 |---|---|
 | `--dry-run`, `-n` | Plan only |
@@ -63,6 +69,7 @@ Examples:
 /role-fleet --models (xai/grok-4, zai/glm-5) refactor the adapter
 /role-fleet --review-only review the auth fix
 /role-fleet --slices 2 fix the login bug
+/role-fleet fix the login bug --dry-run
 ```
 
 `--models` list length sets council size (one reviewer per model). An allowlist, when present, wins for seats it describes.

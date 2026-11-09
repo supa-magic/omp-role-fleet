@@ -4,6 +4,26 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## Unreleased
+
+### Changed — flags live at the edges of the command
+
+- Flags are read from the two edges of the command: a leading run before the
+  first word of the task, and a trailing run after the last one. A flag-shaped
+  word **inside** the task is task text. `/role-fleet add a --dry-run flag to
+  the deploy script` planned a dry run and cut the words out of the task; it
+  is now a task about a flag.
+- The same rule takes the other accidents with it: `--yes` in the middle of a
+  task no longer skips the cast dialog, `--council` no longer buys three paid
+  reviewers, `--allowlist` no longer eats the next word, and a mistyped flag
+  in the middle of a task is no longer reported as a flag at all.
+- `--` ends the flags outright: everything after it is task text, flags
+  included.
+- The task keeps the line breaks and the spacing it was given. The words were
+  rejoined with single spaces before, so a two-line task reached every agent
+  brief as one line.
+
+
 ## 1.7.0
 
 ### Fixed — the ledger works on default host settings
