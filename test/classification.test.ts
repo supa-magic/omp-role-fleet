@@ -146,6 +146,18 @@ const CASES: CastRow[] = [
     why: "`explain` is a look verb; `api` and `module` are subjects and mint nobody",
   },
   {
+    task: "explain the implementation of the auth module",
+    expected: ["scout", "reviewer"],
+    analysisOnly: true,
+    why: "`implementation` is a noun: `implement\\w*` read the subject of the sentence as the verb and minted a shell-holding implementer for a task that asked to be told about the code",
+  },
+  {
+    task: "review the plugin and suggest improvements",
+    expected: ["scout", "reviewer"],
+    analysisOnly: true,
+    why: "`improvements` is a noun too: a review that suggests improvements asks for an opinion, not an edit, and the implementer it used to mint held a shell",
+  },
+  {
     task: "test the payment checkout flow",
     expected: ["scout", "tester"],
     analysisOnly: false,
@@ -299,6 +311,21 @@ for (const row of CASES) {
     }
   });
 }
+
+test("an ask to be told about the code mints no seat that can write", () => {
+  // Two nouns the change vocabulary used to read as verbs: `implementation` and
+  // `improvements`. A subject is not an ask, and a seat that can write — a
+  // shell included — must not appear for a task that only asked to be
+  // explained.
+  for (const task of [
+    "explain the implementation of the auth module",
+    "review the plugin and suggest improvements",
+  ]) {
+    const plan = cast(task);
+    const writers = plan.roles.filter((r) => grantsWrite(r.tools)).map((r) => r.id);
+    assert.deepEqual(writers, [], `${task} must not mint a writer: ${writers.join(",")}`);
+  }
+});
 
 // ── flag-shaped rules ─────────────────────────────────────────────────────────
 

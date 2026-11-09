@@ -233,9 +233,16 @@ export const VOCAB = {
    * nothing asks to look* (see `VOCAB.migration` and the veto in
    * `synthesizePlan`), and carrying `migrat*` here would make "evaluate
    * migrating off lodash" mint the writer the veto exists to refuse.
+   *
+   * Verb *forms* only. The suffix is spelled out per word instead of `\w*`,
+   * because `\w*` also accepted the noun: `implement\w*` matched "the
+   * implementation of the auth module" and `improv\w*` matched "suggest
+   * improvements", so a task that asked to be *told about* the code minted an
+   * implementer and a tester with a shell. A noun names a subject; only the
+   * verb asks for the tree to change.
    */
   changeStrong:
-    /\b(fix\w*|refactor\w*|implement\w*|add|create\w*|rewrite\w*|remove\w*|delet\w*|rename\w*|improv\w*|redesign\w*)\b/i,
+    /\b(fix(?:es|ed|ing)?|refactor(?:s|ed|ing)?|implement(?:s|ed|ing)?|add|create(?:s|d)?|rewrite(?:s|en|ing)?|remove(?:s|d|ing)?|delet(?:e|es|ed|ing)?|rename(?:s|d|ing)?|improv(?:e|es|ed|ing)|redesign(?:s|ed|ing)?)\b/i,
   /**
    * Change words that are also ordinary nouns: `build`, `update`, `write`,
    * `patch`, `change`. They mint the code cast only when nothing in the text
@@ -436,6 +443,17 @@ export interface RoleSpec {
    * and host fallback chains keep working. Absent when unresolved.
    */
   modelResolved?: string;
+  /**
+   * The host's resolver had no answer for this seat's concrete selector.
+   *
+   * Set only for a selector somebody named — a `--models` entry, a `--consul`,
+   * an allowlist pin — because that is a claim about a model: the seat was
+   * promised a provider it cannot have, and it runs on whatever the parent
+   * session falls back to. An `@`-alias left unresolved is not flagged here:
+   * an alias is a request, not a claim, and the brief and the consent screen
+   * already say the alias was not resolved at plan time.
+   */
+  modelUnresolved?: boolean;
 }
 
 export interface RolePlan {

@@ -405,7 +405,10 @@ test("a confirmation that is asked still blocks a real run", async () => {
 
 test("--yes accepts the recommended cast without a dialog", async () => {
   // An agent (or a scripted /role-fleet --yes) must not hang on a menu nobody
-  // answers. The confirmer returns every planned seat — same as "Run all of them".
+  // answers. The confirmer returns every planned seat — same as "Run all of them"
+  // — and the plan's note has to say that is what happened: a cast nobody was
+  // asked about was auto-accepted, and a note that reads "confirmed" claims a
+  // decision that never took place.
   let asked = 0;
   const dir = await mkdtemp(join(tmpdir(), "rf-yes-"));
   // Simulate what makeConfirmer does under autoAccept: return all seat ids.
@@ -416,12 +419,17 @@ test("--yes accepts the recommended cast without a dialog", async () => {
       asked++;
       return new Set(plan.roles.map((r) => r.id));
     },
+    confirmMode: "auto",
   });
   assert.equal(asked, 1);
   assert.equal(result.ok, true);
   assert.ok(result.agents.length > 0);
   assert.ok(
-    result.plan!.notes.some((n) => n.includes("confirmed cast") && n.includes("all seats kept")),
+    result.plan!.notes.some((n) => n.includes("auto-accepted cast") && n.includes("all seats kept")),
     `auto-accept must record a full cast: ${result.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(
+    !result.plan!.notes.some((n) => n.includes("confirmed cast")),
+    `a cast nobody confirmed must not be recorded as confirmed: ${result.plan!.notes.join(" | ")}`,
   );
 });

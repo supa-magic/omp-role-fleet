@@ -72,7 +72,7 @@ export function castQuestion(plan: RolePlan): string {
     members > 1 && distinct < members
       ? ` (${distinct} distinct model${distinct === 1 ? "" : "s"} across ${members} reviewers)`
       : "";
-  const models = [...new Set(plan.roles.map((r) => r.modelResolved ?? r.model))].join(", ");
+  const models = questionModels(plan.roles);
   return `Run ${plan.roles.length} seat(s) on ${models}?${collapse} ${authority}.`;
 }
 
@@ -162,14 +162,31 @@ function seatPurpose(role: RoleSpec): string {
  * The model a seat runs on, in the form a reader can judge cost and vendor by.
  *
  * The alias is never shown as if it were a model: `@task` says what class of
- * work a seat is for and nothing about who answers, which is the whole point of
- * naming seats here. When the host could not resolve the alias the seat still
+ * work a seat is for and nothing about who answers, which is the whole point
+ * of naming seats here. When the host could not resolve the alias the seat still
  * runs — on whatever the parent session falls back to — so the row says that
  * rather than inventing a provider or printing the alias as if it were one.
+ *
+ * A concrete selector the host could not resolve is marked the same way, and
+ * for the same reason: it was named by somebody, and the seat will not run on
+ * it. Printing the selector as if it were the model would be a claim the
+ * consent screen cannot back.
  */
 function seatModel(role: RoleSpec): string {
   if (role.modelResolved) return role.modelResolved;
+  if (role.modelUnresolved) return `${role.model} — unresolved`;
   return role.model.startsWith("@") ? `${role.model} — unresolved` : role.model;
+}
+
+/**
+ * The models the cast runs on, as the consent question names them.
+ *
+ * An alias is a request, so it is printed as it was asked for; a concrete
+ * selector the host could not resolve is marked, because that one was named as
+ * a model and the seat will run on something else.
+ */
+function questionModels(roles: readonly RoleSpec[]): string {
+  return [...new Set(roles.map((r) => (r.modelUnresolved ? `${r.model} — unresolved` : r.modelResolved ?? r.model)))].join(", ");
 }
 
 /**

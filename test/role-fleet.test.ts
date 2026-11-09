@@ -20,6 +20,7 @@ import { gatePlan } from "../src/gate.ts";
 import { agentMarkdown, dispatchGroups, emitAgents, pruneGeneratedAgents, pruneRunDirs, type DispatchGroup } from "../src/agents.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { dispatchPlan, renderDispatch, renderPlan, renderVerdict } from "../src/render.ts";
+import { castQuestion } from "../src/confirm.ts";
 
 function planFor(task: string, maxRoles?: number) {
   return synthesizePlan({ task, cwd: "/tmp", workDir: "/tmp/wf", maxRoles });
@@ -784,6 +785,89 @@ test("a selector the host cannot resolve keeps its alias and claims nothing", as
   const text = renderPlan(result.plan!, result.waves);
   assert.match(text, /reviewer @slow/, "an unresolved seat keeps the alias label");
   assert.ok(!text.includes("reviewer undefined"));
+});
+
+test("a named selector the host cannot resolve is marked unresolved, not printed as a model", async () => {
+  // A selector somebody named — a `--models` entry, a `--consul`, an
+  // allowlist pin — is a claim about a model. The host's resolver is the only
+  // authority on whether it exists, and when it answers with nothing the seat
+  // rides the parent session's model. The plan, the consent screen and the
+  // seat's own brief all have to say so: a plan that named a provider it
+  // never had is a lie the user pays for.
+  const dir = await mkdtemp(join(tmpdir(), "rf-unresolved-pin-"));
+  const result = await runRoleFleet({
+    task: "review the auth module",
+    cwd: dir,
+    models: ["totally/made-up"],
+    resolveModel: () => undefined,
+  });
+  const reviewer = result.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(reviewer.modelUnresolved, true, "the seat must be marked unresolved");
+  assert.equal(reviewer.modelResolved, undefined, "an unresolved seat must not carry a guess");
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("model unresolved") && n.includes("totally/made-up")),
+    `the note must name the selector: ${result.plan!.notes.join(" | ")}`,
+  );
+  // The consent screen is where the spend is approved, so it marks the seat.
+  assert.match(castQuestion(result.plan!), /totally\/made-up — unresolved/, castQuestion(result.plan!));
+  // And so does the brief the seat itself reads.
+  const brief = agentMarkdown(result.plan!, reviewer);
+  assert.match(brief, /Model: `totally\/made-up` \(unresolved at plan time/, brief);
+});
+
+test("a named selector the host resolves to itself is not a failure", async () => {
+  // The counterpart: the resolver answered with the very selector that was
+  // named, so there is nothing to report. A note here would cry wolf on every
+  // run whose model the host knows.
+  const dir = await mkdtemp(join(tmpdir(), "rf-resolved-pin-"));
+  const result = await runRoleFleet({
+    task: "review the auth module",
+    cwd: dir,
+    models: ["totally/made-up"],
+    resolveModel: (spec) => spec,
+  });
+  const reviewer = result.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(reviewer.modelUnresolved, undefined);
+  assert.ok(
+    !result.plan!.notes.some((n) => n.includes("model unresolved")),
+    `a resolved selector must not be reported as broken: ${result.plan!.notes.join(" | ")}`,
+  );
+  assert.ok(!castQuestion(result.plan!).includes("unresolved"), castQuestion(result.plan!));
+});
+
+test("a selector with a thinking-level suffix is judged on the model behind it", async () => {
+  // `provider/id:high` is the model `provider/id` at another effort: the
+  // suffix is not part of the identity, so a host that answers for the bare
+  // selector has answered the question the suffix asked.
+  const dir = await mkdtemp(join(tmpdir(), "rf-suffix-resolved-"));
+  const resolved = await runRoleFleet({
+    task: "review the auth module",
+    cwd: dir,
+    models: ["totally/made-up:high"],
+    resolveModel: (spec) => (spec === "totally/made-up" ? "totally/made-up" : undefined),
+  });
+  const reviewer = resolved.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(reviewer.modelResolved, "totally/made-up", "the model behind the suffix is the model");
+  assert.equal(reviewer.modelUnresolved, undefined, "a resolvable model is not unresolved");
+  assert.ok(
+    !resolved.plan!.notes.some((n) => n.includes("model unresolved")),
+    `a resolvable suffix must not be reported: ${resolved.plan!.notes.join(" | ")}`,
+  );
+
+  // A model that does not exist at all is unresolved with the suffix too.
+  const dir2 = await mkdtemp(join(tmpdir(), "rf-suffix-unresolved-"));
+  const unresolved = await runRoleFleet({
+    task: "review the auth module",
+    cwd: dir2,
+    models: ["totally/made-up:high"],
+    resolveModel: () => undefined,
+  });
+  const reviewer2 = unresolved.plan!.roles.find((r) => r.id === "reviewer")!;
+  assert.equal(reviewer2.modelUnresolved, true, "an unknown model is unknown with a suffix too");
+  assert.ok(
+    unresolved.plan!.notes.some((n) => n.includes("model unresolved") && n.includes("totally/made-up:high")),
+    `the note must name the selector as given: ${unresolved.plan!.notes.join(" | ")}`,
+  );
 });
 
 test("the roster and the run table carry the concrete model, not the tier", async () => {

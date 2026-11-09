@@ -259,35 +259,73 @@ test("applySpecialists drops dependencies on roles absent from the plan", () => 
 
 // ── dynamic tier ──────────────────────────────────────────────────────────────
 
+/**
+ * A proposal reply in the format the tier asks for: the proposer's own reading
+ * of the task, and the roles it proposes.
+ *
+ * The intent is part of the contract, so it is spelled out here rather than
+ * left to a fixture: a reply without one is refused whole.
+ */
+function reply(roles: unknown[], intent: "analysis" | "change" = "change"): string {
+  return JSON.stringify({ intent, roles });
+}
+
 const GOOD_REPLY = `
 Sure, here are the roles:
 \`\`\`json
-[
-  {
-    "id": "db-migration-auditor",
-    "title": "DB migration auditor",
-    "mission": "Check the migration for lock risks and rollback gaps",
-    "acceptance": ["Every DDL statement classified", "Rollback path stated"],
-    "tools": ["read", "grep"],
-    "effort": "high",
-    "model": "@slow",
-    "dependsOn": []
-  }
-]
+{
+  "intent": "change",
+  "roles": [
+    {
+      "id": "db-migration-auditor",
+      "title": "DB migration auditor",
+      "mission": "Check the migration for lock risks and rollback gaps",
+      "acceptance": ["Every DDL statement classified", "Rollback path stated"],
+      "tools": ["read", "grep"],
+      "effort": "high",
+      "model": "@slow",
+      "dependsOn": []
+    }
+  ]
+}
 \`\`\`
 `;
 
 test("a valid fenced proposal is accepted with constraints applied", () => {
-  const roles = parseProposal(GOOD_REPLY);
-  assert.ok(roles);
-  assert.equal(roles!.length, 1);
-  assert.equal(roles![0].id, "db-migration-auditor");
-  assert.equal(roles![0].model, "@slow");
-  assert.deepEqual(roles![0].tools, ["read", "grep"]);
+  const parsed = parseProposal(GOOD_REPLY);
+  assert.ok(parsed);
+  assert.equal(parsed!.intent, "change");
+  assert.equal(parsed!.roles.length, 1);
+  assert.equal(parsed!.roles[0].id, "db-migration-auditor");
+  assert.equal(parsed!.roles[0].model, "@slow");
+  assert.deepEqual(parsed!.roles[0].tools, ["read", "grep"]);
+});
+
+test("a reply without an intent is refused whole", () => {
+  // The intent is what decides whether a proposed writer may join a cast the
+  // static heuristics could not read, so a reply that does not carry it says
+  // nothing about the tree. The tier's rule for every other doubt applies:
+  // keep the static cast.
+  const noIntent = JSON.stringify({
+    roles: [
+      {
+        id: "db-auditor",
+        title: "DB",
+        mission: "Audit the schema carefully",
+        acceptance: ["a"],
+        tools: ["read"],
+        effort: "low",
+        model: "@slow",
+        dependsOn: [],
+      },
+    ],
+  });
+  assert.equal(parseProposal(noIntent), null, "a reply without an intent must be refused");
+  assert.equal(parseProposal(reply([], "look" as never)), null, "an unknown intent must be refused");
 });
 
 test("an invented model, tool, or dependency invalidates the whole proposal", () => {
-  const base = JSON.stringify([
+  const base = reply([
     {
       id: "x-auditor",
       title: "X",
@@ -318,7 +356,7 @@ test("a grant that mixes a real tool with a rogue one is refused whole", () => {
   // wrong dependency. `eval` is the rogue here because a shell is *inside* the
   // builder grant: the rogue has to be a tool no seat may hold, not merely a
   // powerful one.
-  const mixed = JSON.stringify([
+  const mixed = reply([
     {
       id: "x-auditor",
       title: "X",
@@ -333,8 +371,8 @@ test("a grant that mixes a real tool with a rogue one is refused whole", () => {
   assert.equal(parseProposal(mixed), null, "a mixed valid/rogue grant must be refused");
 
   // The all-valid grant of the same shape still passes, shell included.
-  assert.equal(parseProposal(mixed.replace("eval", "grep"))?.length, 1);
-  assert.equal(parseProposal(mixed.replace("eval", "bash"))?.length, 1);
+  assert.equal(parseProposal(mixed.replace("eval", "grep"))?.roles.length, 1);
+  assert.equal(parseProposal(mixed.replace("eval", "bash"))?.roles.length, 1);
 });
 
 test("a dependency that leaves the plan is reported, not dropped in silence", async () => {
@@ -349,7 +387,7 @@ test("a dependency that leaves the plan is reported, not dropped in silence", as
     cwd: dir,
     maxRoles: 6,
     propose: async () =>
-      JSON.stringify([
+      reply([
         // `implementer` is reserved but absent from an analysis-only plan.
         { id: "ledger-auditor", title: "L", mission: "Audit the ledger", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: ["implementer"] },
       ]),
@@ -396,7 +434,7 @@ test("asking for the specialist tier on a host without side turns says so", asyn
 test("a proposal claiming an id the plan already uses is discarded, not merged", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-collide-"));
   const propose = async (id: string) => async () =>
-    JSON.stringify([
+    reply([
       { id, title: "F", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] },
     ]);
 
@@ -429,9 +467,9 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
 
 test("more than three proposed roles is refused outright", () => {
   const one = { id: "a-one", title: "A", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] };
-  const many = JSON.stringify([one, { ...one, id: "b-two" }, { ...one, id: "c-three" }, { ...one, id: "d-four" }]);
+  const many = reply([one, { ...one, id: "b-two" }, { ...one, id: "c-three" }, { ...one, id: "d-four" }]);
   assert.equal(parseProposal(many), null);
-  assert.equal(parseProposal(JSON.stringify([one, { ...one, id: "b-two" }]))?.length, 2);
+  assert.equal(parseProposal(reply([one, { ...one, id: "b-two" }]))?.roles.length, 2);
 });
 
 test("shouldPropose triggers on explicit asks, degenerate casts, and thin analysis plans", () => {
@@ -625,7 +663,7 @@ test("a proposal naming the same id twice is discarded whole", () => {
   // down with them. The proposal is not an upgrade the run depends on, so any
   // doubt keeps the static cast.
   const dupes = parseProposal(
-    JSON.stringify([
+    reply([
       { id: "db-auditor", title: "A", mission: "Audit the schema", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] },
       { id: "db-auditor", title: "B", mission: "Audit it again", acceptance: ["a"], tools: ["grep"], effort: "low", model: "@task", dependsOn: [] },
     ]),
@@ -638,25 +676,81 @@ test("a proposal's seat is derived, never echoed: write tools mean implementer, 
   // routes by seat — a literal or attacker-chosen core would silently un-pin
   // a pinned run.
   const writer = parseProposal(
-    JSON.stringify([
+    reply([
       { id: "db-migrator", title: "DB", mission: "Migrate the schema carefully", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
     ]),
   );
   const reader = parseProposal(
-    JSON.stringify([
+    reply([
       { id: "db-auditor", title: "DB", mission: "Audit the schema carefully", acceptance: ["a"], tools: ["read", "grep"], effort: "low", model: "@slow", dependsOn: [] },
     ]),
   );
-  assert.equal(writer![0].core, "implementer", "write grant must map to the implementer seat");
-  assert.equal(reader![0].core, "reviewer", "read-only grant must map to the reviewer seat");
+  assert.equal(writer!.roles[0].core, "implementer", "write grant must map to the implementer seat");
+  assert.equal(reader!.roles[0].core, "reviewer", "read-only grant must map to the reviewer seat");
 
   // Neither seat may come from the proposal itself, whatever it claims.
   const claimer = parseProposal(
-    JSON.stringify([
+    reply([
       { id: "sneaky-seat", title: "S", mission: "Claim a seat that is not mine", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [], core: "planner" },
     ]),
   );
-  assert.equal(claimer![0].core, "reviewer", "an echoed core must be overwritten by the derived one");
+  assert.equal(claimer!.roles[0].core, "reviewer", "an echoed core must be overwritten by the derived one");
+});
+
+test("a degenerate cast takes the proposer's verdict: an analysis answer refuses the writer", async () => {
+  // The static tier could not read this task — that is why the tier ran at all
+  // — so its own verdict on the tree is worth nothing here: it never decided
+  // one, it only failed to. The proposer's reading is the verdict that exists,
+  // and a review task must not come back with a seat holding a shell.
+  const dir = await mkdtemp(join(tmpdir(), "rf-degenerate-intent-"));
+  const result = await runRoleFleet({
+    task: "отрефактори модуль авторизации и проверь его",
+    cwd: dir,
+    maxRoles: 8,
+    propose: async () =>
+      reply(
+        [
+          { id: "shell-reader", title: "S", mission: "Read with a shell", acceptance: ["a"], tools: ["read", "bash"], effort: "low", model: "@slow", dependsOn: [] },
+          { id: "plain-reader", title: "R", mission: "Read", acceptance: ["a"], tools: ["read"], effort: "low", model: "@task", dependsOn: [] },
+        ],
+        "analysis",
+      ),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    !result.plan!.roles.some((r) => r.id === "shell-reader"),
+    `a writer joined a plan the proposer called analysis: ${result.plan!.roles.map((r) => r.id).join(", ")}`,
+  );
+  assert.ok(
+    result.plan!.roles.some((r) => r.id === "plain-reader"),
+    "refusing the writer must not throw away the whole tier",
+  );
+  assert.ok(
+    result.plan!.notes.some((n) => n.includes("proposed writer(s) refused") && n.includes("shell-reader")),
+    `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
+  );
+  assert.equal(result.plan!.analysisOnly, true, "the plan follows the proposer's verdict");
+});
+
+test("a degenerate cast accepts the writer the proposer asked for", async () => {
+  // The counterpart, so the rule is a verdict and not a blanket ban: the
+  // proposer says the task changes the tree, and a writer is what it asked for.
+  const dir = await mkdtemp(join(tmpdir(), "rf-degenerate-change-"));
+  const result = await runRoleFleet({
+    task: "отрефактори модуль авторизации",
+    cwd: dir,
+    maxRoles: 8,
+    propose: async () =>
+      reply(
+        [{ id: "extra-writer", title: "W", mission: "Write more", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] }],
+        "change",
+      ),
+  });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.plan!.roles.some((r) => r.id === "extra-writer"),
+    `a legitimate proposed writer was refused: ${result.plan!.notes.join(" | ")}`,
+  );
 });
 
 test("a proposed writer cannot enter an analysis-only plan", async () => {
@@ -677,7 +771,7 @@ test("a proposed writer cannot enter an analysis-only plan", async () => {
     maxRoles: 8,
     models: ["xai/grok-4", "zai/glm-5"],
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "ledger-sweeper", title: "L", mission: "Sweep the ledger", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@slow", dependsOn: [] },
         { id: "ledger-reader", title: "R", mission: "Read the ledger", acceptance: ["a"], tools: ["read"], effort: "low", model: "@task", dependsOn: [] },
       ]),
@@ -710,7 +804,7 @@ test("a build plan still accepts a proposed writer", async () => {
     cwd: dir,
     maxRoles: 8,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "crypto-hander", title: "C", mission: "Hand the keys", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
       ]),
   });
@@ -739,7 +833,7 @@ test("a writer under a non-implementer id is not mistaken for an analysis-only p
       cwd: dir,
       maxRoles: 8,
       propose: async () =>
-        JSON.stringify([
+        reply([
           { id: "extra-tuner", title: "T", mission: "Tune the config", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
         ]),
     });
@@ -776,7 +870,7 @@ test("the merge re-applies the role cap to what it adds", async () => {
     cwd: dir,
     maxRoles: 4,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "tuner-a", title: "A", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
         { id: "tuner-b", title: "B", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
       ]),
@@ -866,7 +960,7 @@ test("a proposed seat holding only a shell is a writer, and refused where nothin
     cwd: dir,
     maxRoles: 8,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "shell-reader", title: "S", mission: "Read with a shell", acceptance: ["a"], tools: ["read", "bash"], effort: "low", model: "@slow", dependsOn: [] },
         { id: "plain-reader", title: "R", mission: "Read", acceptance: ["a"], tools: ["read"], effort: "low", model: "@task", dependsOn: [] },
       ]),
@@ -896,7 +990,7 @@ test("a fanned-out plan refuses a proposed writer, and keeps the read-only propo
     maxRoles: 8,
     slices: 2,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "extra-writer", title: "W", mission: "Write more", acceptance: ["a"], tools: ["read", "edit"], effort: "low", model: "@task", dependsOn: [] },
         { id: "extra-reader", title: "R", mission: "Read more", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
       ]),
@@ -924,7 +1018,7 @@ test("a council plan still leaves a proposal slot", async () => {
     council: 3,
     maxRoles: 4,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "threat-modeler", title: "T", mission: "Model threats", acceptance: ["a"], tools: ["read"], effort: "low", model: "@plan", dependsOn: [] },
       ]),
   });
@@ -947,7 +1041,7 @@ test("a full default build cast refuses a proposal instead of exceeding the cap"
     task: "fix the auth bug with a specialist expert",
     cwd: dir,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "extra-reader", title: "R", mission: "Read", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
       ]),
   });
@@ -972,7 +1066,7 @@ test("a consul occupies a merge slot even though it is never dropped", async () 
     consul: "xai/grok-4",
     maxRoles: 4,
     propose: async () =>
-      JSON.stringify([
+      reply([
         { id: "tuner-a", title: "A", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
         { id: "tuner-b", title: "B", mission: "Tune", acceptance: ["a"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] },
       ]),
