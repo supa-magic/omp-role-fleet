@@ -4,6 +4,59 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## Unreleased
+
+### Fixed — write seats only where the tree may change
+
+- The change vocabulary reads verb forms only. `implement\w*` matched "the
+  implementation of the auth module" and `improv\w*` matched "suggest
+  improvements", so a task that asked to be *told about* the code minted an
+  implementer and a tester with a shell. A subject is not an ask.
+- The specialist proposal now carries the proposer's own reading of the task —
+  `analysis` or `change`. On a cast the static heuristics could not read (the
+  degenerate cast the tier exists for) that verdict decides whether a proposed
+  writer may join, so a task read as analysis gets no seat that can change the
+  code.
+- A selector the host cannot resolve is marked unresolved in the plan, on the
+  consent screen and in the seat's brief. A `--models` entry, a `--consul` or an
+  allowlist pin that names a model the host does not have used to be printed as
+  if it were one; the seat rides the session model instead, and the plan says
+  so.
+- A cast nobody was asked about is recorded as auto-accepted, not as confirmed.
+  The agent-driven path and `--yes` open no dialog, and the note claimed a
+  decision that never happened.
+
+### Fixed — a typo no longer starts a paid run
+
+- `/role-fleet report run-12x` — a word that starts like a run id but is not
+  one — is a usage warning now, and plans nothing. It used to fall through to
+  planning and start a fleet for a typo. The run-id shape comes from
+  `run-layout.ts`, which owns it.
+
+### Changed — the minimum host, stated honestly
+
+- The minimum host is oh-my-pi **18.11.0**: the first release that reads
+  `structured: true` from an agent definition, which is what gives a seat its
+  `yield` tool and its report. On an older host a seat has no `yield` tool, its
+  report is never placed, and nothing says so. The README and the dev
+  dependency say so, and `/role-fleet doctor` reports the running host's version
+  and whether it is new enough.
+
+### Docs — the README matches the code
+
+- `--models=a,b` works without brackets; the flag table said the brackets were
+  required. `--consul` states its shape (`@alias` or `provider/id`; a bare name
+  goes as `--consul=NAME`) and `--max-roles` its minimum of 2.
+- The cast presets are named as they are: the council preset keeps exactly one
+  reviewer, it does not keep "fewer".
+- `@designer` and `@vision` are documented, with the `modelRoles` entries they
+  need to resolve.
+- The allowlist file documents `enabled` and `roles[].aliases`. There is an
+  environment table (`ROLE_FLEET_ALLOWLIST`, `ROLE_FLEET_MCP_READONLY`, and the
+  allowlist paths offered for `--allowlist`) and a table of the
+  `role_fleet_plan` parameters with their defaults.
+
+
 ## 1.7.0
 
 ### Fixed — the ledger works on default host settings
