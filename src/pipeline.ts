@@ -112,6 +112,13 @@ export interface RunOptions {
    */
   confirm?: (plan: RolePlan) => Promise<ReadonlySet<string> | null>;
   /**
+   * Whether the confirmation is a dialog a human answers or an automatic
+   * acceptance. Only the wording of the note changes: a cast nobody was asked
+   * about was auto-accepted, and saying "confirmed" for it claims a decision
+   * that never happened.
+   */
+  confirmMode?: "ask" | "auto";
+  /**
    * Hand the approved plan to the surface that dispatches it (the command sends
    * it to the main model; the tool has no dispatch step). Absent = emit only.
    * Called after the manifest is written, so a failure here leaves a complete
@@ -247,8 +254,51 @@ async function withProposals(opts: RunOptions, plan: RolePlan, runId: string): P
   if (!opts.propose) return note("specialist tier unavailable on this host — static cast kept");
   if (opts.dryRun) return note("dry run: specialist tier skipped — it is a paid model call");
   const proposed = await proposeSpecialists(opts.task, opts.propose);
-  if (!proposed?.length) return note("specialist proposal rejected — static cast kept");
-  return mergeProposals(plan, proposed, { artifactDir: runDir(opts.cwd, runId), maxRoles: opts.maxRoles, analysisOnly });
+  if (!proposed?.roles.length) return note("specialist proposal rejected — static cast kept");
+  // On a degenerate cast the static tier's own verdict is worth nothing: it is
+  // degenerate *because* it could not read the task, so it never decided
+  // whether the tree may change — it only failed to. The proposer's reading is
+  // the verdict that exists, so an "analysis" answer makes the plan
+  // analysis-only and a proposed writer is refused exactly as it would be on a
+  // cast the static tier had read. A "change" answer leaves the plan alone:
+  // it cannot raise a verdict the static tier reached on its own.
+  const readsAsAnalysis = scope.degenerate && proposed.intent === "analysis";
+  const merged = mergeProposals(
+    readsAsAnalysis ? { ...plan, analysisOnly: true } : plan,
+    proposed.roles,
+    {
+      artifactDir: runDir(opts.cwd, runId),
+      maxRoles: opts.maxRoles,
+      analysisOnly: analysisOnly || readsAsAnalysis,
+    },
+  );
+  if (!readsAsAnalysis) return merged;
+  return { ...merged, notes: [...merged.notes, "specialist tier: the proposer read this task as analysis — no seat may change the code"] };
+}
+
+/**
+ * Resolve one seat's selector against the host.
+ *
+ * The host's resolver is the only authority on which provider answers, so a
+ * selector it cannot resolve is not a model at all: the seat runs on whatever
+ * the parent session falls back to. A concrete selector somebody named — a
+ * `--models` entry, a `--consul`, an allowlist pin — is a *claim* about a
+ * model, so it is marked unresolved and the plan says so. An `@`-alias is only
+ * a request; it keeps the wording it always had.
+ */
+function resolveSeat(role: RoleSpec, resolve: (spec: string) => string | undefined): RoleSpec {
+  const concrete = resolve(role.model);
+  if (concrete) return concrete === role.model ? role : { ...role, modelResolved: concrete };
+  // A thinking level is not part of the model identity: `provider/id:high` is
+  // the model `provider/id` at another effort, so a host that answers for the
+  // bare selector has answered the question the suffix asked.
+  const base = baseModel(role.model);
+  if (base !== role.model) {
+    const resolvedBase = resolve(base);
+    if (resolvedBase) return { ...role, modelResolved: resolvedBase };
+  }
+  if (role.model.startsWith("@")) return role;
+  return { ...role, modelUnresolved: true };
 }
 
 /**
@@ -297,12 +347,15 @@ async function planCast(
   // The host's own resolution is the only authority on which provider answers;
   // a selector that resolves to nothing stays unresolved rather than guessed.
   const resolve = opts.resolveModel;
-  const roles = resolve
-    ? gate.plan.roles.map((r) => {
-        const concrete = resolve(r.model);
-        return concrete && concrete !== r.model ? { ...r, modelResolved: concrete } : r;
-      })
-    : gate.plan.roles;
+  const roles = resolve ? gate.plan.roles.map((r) => resolveSeat(r, resolve)) : gate.plan.roles;
+  // A named selector the host cannot resolve is a promise the run cannot keep:
+  // the seat rides the parent session's model, and the user is told that here
+  // rather than discovering it from a fallback notice after the money is spent.
+  for (const r of roles) {
+    if (r.modelUnresolved) {
+      notes.push(`model unresolved: ${r.model} — the seat runs on the session model`);
+    }
+  }
 
   // Resolution is the first point a collapsed council is knowable; this is the
   // last note before the spend.
@@ -341,13 +394,16 @@ async function confirmCast(
   // `reviewer-c2` on its model rather than re-spreading the chain.
   const rechecked = gatePlan({ ...plan, roles: kept });
   if (!rechecked.ok || !rechecked.plan) return { stop: stopped(rechecked.verdict) };
-  // The verdict travels with the cast it describes.
+  // The verdict travels with the cast it describes. A cast nobody was asked
+  // about was auto-accepted, and calling that "confirmed" claims a decision
+  // that never happened: the agent-driven path and `--yes` both land here.
+  const wording = opts.confirmMode === "auto" ? "auto-accepted cast" : "confirmed cast";
   return {
     plan: {
       ...rechecked.plan,
       notes: [
         ...rechecked.plan.notes,
-        dropped.length ? `confirmed cast: dropped ${dropped.join(", ")}` : "confirmed cast: all seats kept",
+        dropped.length ? `${wording}: dropped ${dropped.join(", ")}` : `${wording}: all seats kept`,
       ],
     },
     verdict: rechecked.verdict,

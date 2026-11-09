@@ -44,7 +44,7 @@
     "prepublishOnly": "npm test && npm run typecheck"
   },
   "devDependencies": {
-    "@oh-my-pi/pi-coding-agent": "^18.10.4",
+    "@oh-my-pi/pi-coding-agent": "^18.11.0",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
   },

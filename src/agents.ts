@@ -216,10 +216,16 @@ function frontmatter(role: RoleSpec, name: string): string {
  * names the model, and "(not resolved at plan time)" would claim a resolver
  * failure that did not happen. Only an `@`-alias left unresolved is honestly
  * "not resolved".
+ *
+ * A concrete selector the host could not resolve is a different case: it was
+ * named by somebody — a `--models` entry, a `--consul`, an allowlist pin — and
+ * the seat will run on the parent session's model instead of it. The brief
+ * says so rather than letting the pin read as the model that answers.
  */
-function modelNote(model: string, resolved?: string): string {
-  if (resolved) return ` → resolved to \`${resolved}\``;
-  return model.startsWith("@") ? " (not resolved at plan time)" : "";
+function modelNote(role: RoleSpec): string {
+  if (role.modelResolved) return ` → resolved to \`${role.modelResolved}\``;
+  if (role.modelUnresolved) return " (unresolved at plan time — the seat runs on the session model)";
+  return role.model.startsWith("@") ? " (not resolved at plan time)" : "";
 }
 
 /**
@@ -279,7 +285,7 @@ export function agentMarkdown(plan: RolePlan, role: RoleSpec, name = `${AGENT_PR
     // prompt carries no model name, so the only answer it could give is this
     // very line — which a fallback has already invalidated. The host reports
     // the model that actually served the run from the settled result instead.
-    `Model: \`${role.model}\`${modelNote(role.model, role.modelResolved)}`,
+    `Model: \`${role.model}\`${modelNote(role)}`,
     "",
     "## Mission",
     "",

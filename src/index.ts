@@ -24,6 +24,8 @@ import { AGENT_PREFIX, DEFAULT_MAX_ROLES, MAX_SLICES, planWaves, type RolePlan }
 import { renderObservation } from "./model-observed.ts";
 import { isMcpToolName, mcpAllowlistFromEnv, mcpGuardVerdict, seatMayWrite } from "./mcp-policy.ts";
 import { clearNotifier, notify, seatRecord, seatToolsFromDefinition, setNotifier, type SeatRecord } from "./seats.ts";
+import { RUN_ID } from "./run-layout.ts";
+import { describeHost } from "./host.ts";
 import type { RoleProposer } from "./generate.ts";
 
 /** The published version, read from the manifest that ships beside `src/`. */
@@ -45,6 +47,11 @@ function runOptions(
   onDispatch?: RunOptions["onDispatch"],
   confirmMode?: "ask" | "auto",
 ): RunOptions {
+  // One decision, read twice: the confirmer either opens a dialog a human can
+  // answer or accepts the recommended cast on its own, and the plan's note has
+  // to say which happened. Two places computing it is how a "confirmed cast"
+  // note ended up on a run nobody was asked about.
+  const autoAccept = confirmMode === "auto" || input.yes === true || ctx.agent?.kind === "sub";
   return {
     task: input.task,
     cwd: input.cwd,
@@ -68,12 +75,10 @@ function runOptions(
     // `--yes` take the recommended cast without opening a dialog that no one
     // can answer.
     pluginVersion: PLUGIN_VERSION,
-    confirm: makeConfirmer(ctx.ui, progress, {
-      autoAcceptRecommended:
-        confirmMode === "auto" ||
-        input.yes === true ||
-        ctx.agent?.kind === "sub",
-    }),
+    confirm: makeConfirmer(ctx.ui, progress, { autoAcceptRecommended: autoAccept }),
+    // The plan note follows the dialog, not the other way round: a cast
+    // nobody was asked about was auto-accepted.
+    confirmMode: autoAccept ? "auto" : "ask",
     ...(onDispatch ? { onDispatch } : {}),
   };
 }
@@ -517,6 +522,7 @@ export default function roleFleet(pi: ExtensionAPI): void {
           ctx.ui.notify(
             [
               `role-fleet ${PLUGIN_VERSION}`,
+              describeHost(pi.pi?.VERSION as string | undefined),
               `specialist tier: ${typeof ctx.runEphemeralTurn === "function" ? "available" : "unavailable (static cast only)"}`,
               `model resolution: ${typeof ctx.models?.resolve === "function" ? "available" : "unavailable (aliases shown unresolved)"}`,
               `confirmation dialog: ${typeof ctx.ui?.askDialog === "function" ? "available" : "unavailable (dispatches without asking)"}`,
@@ -529,9 +535,25 @@ export default function roleFleet(pi: ExtensionAPI): void {
           );
           return;
         }
-        if (words[0] === "report" && (words.length === 1 || (words.length === 2 && /^run-\d+$/.test(words[1]!)))) {
-          ctx.ui.notify(await renderRunReport(ctx.cwd, words[1]), "info");
-          return;
+        if (words[0] === "report") {
+          if (words.length === 1) {
+            ctx.ui.notify(await renderRunReport(ctx.cwd, undefined), "info");
+            return;
+          }
+          if (words.length === 2 && RUN_ID.test(words[1]!)) {
+            ctx.ui.notify(await renderRunReport(ctx.cwd, words[1]), "info");
+            return;
+          }
+          // A word that starts like a run id but is not one is a typo, not a
+          // task: `report run-12x` used to fall through to planning, and a
+          // paid run was started for a word the user never meant as a task.
+          if (words.length === 2 && words[1]!.startsWith("run-")) {
+            ctx.ui.notify(
+              `usage: /role-fleet report [run-id] — "${words[1]}" is not a run id (run ids look like run-1789459200000)`,
+              "warning",
+            );
+            return;
+          }
         }
 
         const { flags, task, problems } = parseFlags(command);

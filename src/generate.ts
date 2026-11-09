@@ -8,6 +8,11 @@
  * the plan still ships. A proposal can never invent a model (aliases only),
  * a tool outside the grant list, a dependency that does not resolve, or a role
  * count past the cap.
+ *
+ * The reply carries one more thing: the proposer's own reading of the task —
+ * `analysis` or `change`. The tier exists for a cast the static heuristics
+ * could not read, and on such a cast that reading is the only verdict there
+ * is, so it decides whether a proposed writer may join.
  */
 import type { Effort, RoleSpec } from "./core.ts";
 import { BUILD_TOOLS, grantsWrite, SEAT_CATALOG, VOCAB } from "./core.ts";
@@ -34,8 +39,12 @@ const ALLOWED_TOOLS: readonly string[] = BUILD_TOOLS;
 const ALLOWED_EFFORT = new Set<Effort>(["minimal", "low", "medium", "high", "xhigh"]);
 
 const PROMPT = [
-  "You propose specialist agent roles for one task. Reply with ONLY a JSON array, no prose.",
-  "Each element: {\"id\":\"kebab-case-id\",\"title\":\"...\",\"mission\":\"one sentence\",",
+  "You propose specialist agent roles for one task. Reply with ONLY a JSON object, no prose:",
+  "{\"intent\":\"analysis|change\",\"roles\":[ ...roles... ]}",
+  "\"intent\" is \"analysis\" when the task asks to look at, explain or judge something,",
+  "and \"change\" when it asks for the tree to change. It is required: a reply without",
+  "it is refused whole.",
+  "Each role: {\"id\":\"kebab-case-id\",\"title\":\"...\",\"mission\":\"one sentence\",",
   "\"acceptance\":[\"check 1\",\"check 2\"],\"tools\":[...subset of " + JSON.stringify(ALLOWED_TOOLS) + "],",
   "\"effort\":\"one of minimal|low|medium|high|xhigh\",\"model\":\"one of " + JSON.stringify(PROPOSED_ALIAS) + "\",",
   "\"dependsOn\":[\"ids of other proposed roles, usually empty\"]}",
@@ -160,25 +169,51 @@ function hasDependencyCycle(roles: readonly RoleSpec[]): boolean {
 }
 
 /**
- * Parse and validate a proposal. Returns null on any doubt — the caller treats
- * that as "keep the static cast", never as an error worth surfacing.
+ * What the proposer says the task is: an ask to look, or an ask to change.
+ *
+ * The static tier reads the task with a vocabulary of English words, so a task
+ * it cannot read leaves a degenerate cast — one investigator — with no verdict
+ * on the tree at all. The proposer is the only thing that can look at such a
+ * task and say which kind it is, and the answer decides whether a proposed
+ * writer may join.
  */
-export function parseProposal(reply: string): RoleSpec[] | null {
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1] : reply.slice(reply.indexOf("["), reply.lastIndexOf("]") + 1);
-  if (!body.trim()) return null;
+export type ProposalIntent = "analysis" | "change";
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.trim());
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed) || !parsed.length || parsed.length > 3) return null;
+/** A proposal that survived every check: the proposer's reading, and its roles. */
+export interface ParsedProposal {
+  /** The proposer's own reading of the task. */
+  intent: ProposalIntent;
+  /** The proposed roles, already validated against every hard constraint. */
+  roles: RoleSpec[];
+}
+
+/**
+ * The JSON bodies a reply may carry: the fenced block, or the object the
+ * prose is wrapped around.
+ *
+ * Both are tried, because a model that answers with a sentence around the
+ * object is answering correctly — the fence is a convenience, not a contract.
+ */
+function jsonBodies(reply: string): string[] {
+  const bodies: string[] = [];
+  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced?.[1]?.trim()) bodies.push(fenced[1].trim());
+  const first = reply.indexOf("{");
+  const last = reply.lastIndexOf("}");
+  if (first >= 0 && last > first) bodies.push(reply.slice(first, last + 1));
+  return bodies;
+}
+
+/**
+ * Validate the roles of a proposal. Returns null on any doubt — the caller
+ * treats that as "keep the static cast", never as an error worth surfacing.
+ */
+function parseRoles(items: unknown): RoleSpec[] | null {
+  if (!Array.isArray(items) || !items.length || items.length > 3) return null;
 
   const declared = new Set<string>();
   const ids = new Set<string>();
-  for (const item of parsed) {
+  for (const item of items) {
     const id = (item as RawRole).id;
     if (typeof id === "string" && id) declared.add(id);
   }
@@ -187,7 +222,7 @@ export function parseProposal(reply: string): RoleSpec[] | null {
   // elements would survive every per-element check only to fail the gate and
   // take a perfectly good static cast down with them. Same all-or-nothing rule
   // as every other constraint here.
-  for (const item of parsed) {
+  for (const item of items) {
     const id = (item as RawRole).id;
     if (typeof id !== "string" || !id) continue;
     if (ids.has(id)) return null;
@@ -195,7 +230,7 @@ export function parseProposal(reply: string): RoleSpec[] | null {
   }
 
   const roles: RoleSpec[] = [];
-  for (const item of parsed) {
+  for (const item of items) {
     const role = parseRaw(item as RawRole, declared);
     if (!role) return null; // one bad element invalidates the whole proposal
     roles.push(role);
@@ -205,6 +240,34 @@ export function parseProposal(reply: string): RoleSpec[] | null {
   // constraint here.
   if (hasDependencyCycle(roles)) return null;
   return roles;
+}
+
+/**
+ * Parse and validate a proposal. Returns null on any doubt — the caller treats
+ * that as "keep the static cast", never as an error worth surfacing.
+ *
+ * The intent is part of the contract, not a nicety: a reply without one is
+ * refused whole, exactly like a reply with a bad tool. The tier exists to
+ * cover a cast the static heuristics could not read, and a proposal that does
+ * not say what kind of task it is cannot be trusted with a writer — the
+ * question it answers is the one that decides whether a seat may write.
+ */
+export function parseProposal(reply: string): ParsedProposal | null {
+  for (const body of jsonBodies(reply)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const record = parsed as { intent?: unknown; roles?: unknown };
+    if (record.intent !== "analysis" && record.intent !== "change") continue;
+    const roles = parseRoles(record.roles);
+    if (!roles) continue;
+    return { intent: record.intent, roles };
+  }
+  return null;
 }
 
 /** What the static cast looks like to the tier that may have to cover for it. */
@@ -243,7 +306,7 @@ export function shouldPropose(task: string, scope: ProposalScope): boolean {
 export async function proposeSpecialists(
   task: string,
   propose: RoleProposer,
-): Promise<RoleSpec[] | null> {
+): Promise<ParsedProposal | null> {
   let reply: string;
   try {
     reply = await propose(`${PROMPT}\n\nTask: ${task}`);

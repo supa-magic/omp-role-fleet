@@ -16,6 +16,12 @@ import { DEFAULT_MAX_ROLES } from "../src/core.ts";
 interface StubHost {
   pi: {
     zod: unknown;
+    /**
+     * The host's own exports, as the extension API hands them over. The
+     * version comes from here, so a stub that omits it stands for a host that
+     * cannot say which release it is.
+     */
+    pi: { VERSION: string };
     on: (event: string, handler: (event: unknown, ctx: unknown) => void) => void;
     registerCommand: (name: string, spec: Record<string, unknown>) => void;
     registerTool: (spec: Record<string, unknown>) => void;
@@ -83,7 +89,7 @@ function zodStub(): unknown {
   };
 }
 
-function stubHost(opts: { sendMessageThrows?: boolean } = {}): StubHost {
+function stubHost(opts: { sendMessageThrows?: boolean; hostVersion?: string } = {}): StubHost {
   const commands = new Map<string, Record<string, unknown>>();
   const tools = new Map<string, Record<string, unknown>>();
   const events: string[] = [];
@@ -99,6 +105,9 @@ function stubHost(opts: { sendMessageThrows?: boolean } = {}): StubHost {
     errors,
     pi: {
       zod: zodStub(),
+      // A host new enough to read `structured` from agent frontmatter: the
+      // release that added it (18.11.0) is what the plugin's own minimum is.
+      pi: { VERSION: opts.hostVersion ?? "18.11.0" },
       on: (event, handler) => {
         events.push(event);
         handlers.set(event, handler);
@@ -930,6 +939,58 @@ test("report and runs read the manifest, and report-the-word is still a task", a
   assert.ok(task.notices.some((n) => n.text.includes("Gate: approve")), JSON.stringify(task.notices));
 });
 
+test("a run id that is not one is a usage warning, not a paid plan", async () => {
+  // `report run-12x` matches no run id, so it used to fall through to planning:
+  // a whole paid fleet for a typo. The word still starts like a run id, which
+  // is what makes it a typo rather than a task — "report the latency numbers"
+  // is a task and still is.
+  const dir = await mkdtemp(join(tmpdir(), "rf-reporttypo-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+
+  const { ctx, notices } = commandCtx(dir);
+  await handler("report run-12x", ctx);
+  assert.ok(
+    notices.some((n) => n.level === "warning" && /not a run id/.test(n.text)),
+    `a typo'd run id must be a usage warning: ${JSON.stringify(notices)}`,
+  );
+  assert.ok(!notices.some((n) => n.text.includes("Gate: approve")), "the typo must not plan a run");
+  assert.equal(host.sent.length, 0, "nothing may be dispatched");
+  assert.ok(!existsSync(join(dir, ".role-fleet")), "no run tree may be written");
+
+  // The same words without the run-id shape are a task, and are planned.
+  const task = commandCtx(dir);
+  await handler("report the latency numbers", task.ctx);
+  assert.ok(task.notices.some((n) => n.text.includes("Gate: approve")), JSON.stringify(task.notices));
+});
+
+test("the doctor says whether the host is new enough for structured seat reports", async () => {
+  // A host that cannot read `structured` from agent frontmatter gives every
+  // seat no `yield` tool: the reports are never placed, and the run looks
+  // healthy while it happens. The doctor is where that has to be visible.
+  const dir = await mkdtemp(join(tmpdir(), "rf-doctor-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+
+  const { ctx, notices } = commandCtx(dir);
+  await handler("doctor", ctx);
+  const doctor = notices.find((n) => n.text.includes("structured seat reports"))?.text ?? "";
+  assert.match(doctor, /host 18\.11\.0/, doctor);
+  assert.match(doctor, /supported/, doctor);
+
+  const old = stubHost({ hostVersion: "18.10.4" });
+  roleFleet(old.pi as never);
+  const oldHandler = old.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  const oldCtx = commandCtx(dir);
+  await oldHandler("doctor", oldCtx.ctx);
+  const oldDoctor = oldCtx.notices.find((n) => n.text.includes("structured seat reports"))?.text ?? "";
+  assert.match(oldDoctor, /host 18\.10\.4/, oldDoctor);
+  assert.match(oldDoctor, /UNSUPPORTED/, oldDoctor);
+  assert.match(oldDoctor, /18\.11\.0\+/, oldDoctor);
+});
+
 test("the plan tool declares every parameter its execute reads", () => {
   const host = stubHost();
   roleFleet(host.pi as never);
@@ -1133,6 +1194,17 @@ test("--yes skips the cast dialog and keeps every planned seat", async () => {
   assert.ok(
     notices.some((n) => /auto-accepted recommended cast/i.test(n.text)),
     `auto-accept notice missing: ${JSON.stringify(notices)}`,
+  );
+  // The plan's own note must match what happened: nobody was asked, so the
+  // cast was auto-accepted, and a note that says "confirmed" claims a decision
+  // that never took place.
+  assert.ok(
+    notices.some((n) => /auto-accepted cast/.test(n.text)),
+    `the plan must record an auto-accepted cast: ${JSON.stringify(notices)}`,
+  );
+  assert.ok(
+    !notices.some((n) => /confirmed cast/.test(n.text)),
+    `a cast nobody confirmed must not be recorded as confirmed: ${JSON.stringify(notices)}`,
   );
   // Full cast for a build task includes implementer + reviewer at minimum.
   const msg = host.sent.at(-1)?.message ?? "";

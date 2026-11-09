@@ -27,7 +27,10 @@ omp plugin list
 ```
 
 From a checkout: `omp plugin link ./omp-role-fleet`  
-Requires oh-my-pi **18.10+**.
+Requires oh-my-pi **18.11+** — the first release that reads `structured: true` from an
+agent definition, which is what gives a seat its `yield` tool and its report. On an older
+host a seat has no `yield` tool, its report is never placed, and nothing says so.
+`/role-fleet doctor` reports the host version and whether it is new enough.
 
 ---
 
@@ -55,10 +58,10 @@ text.
 | `--dry-run`, `-n` | Plan only |
 | `--yes`, `-y` | Skip cast dialog — accept recommended seats (for agents/automation) |
 | `--council [N]` | N reviewers on different models (max 3) |
-| `--models (a,b,c)` | Review seats on these models, in order (max 5; brackets required) |
-| `--consul MODEL` | Model that reconciles council reports (default: session model) |
+| `--models (a,b,c)` | Review seats on these models, in order (max 5). `--models=a,b` works too — brackets are optional in the `=` form and required in the spaced one |
+| `--consul MODEL` | Model that reconciles council reports: `@alias` or `provider/id`. A bare name goes as `--consul=NAME` (default: session model) |
 | `--review-only` | Scout + review only — no code changes |
-| `--max-roles N` | Cap generated roles (default 4, max 8) |
+| `--max-roles N` | Cap generated roles (default 4, min 2, max 8) |
 | `--slices N` | N parallel writer seats (max 4) |
 | `--allowlist FILE` | Pin models via JSON instead of `@` aliases |
 
@@ -84,26 +87,71 @@ export ROLE_FLEET_ALLOWLIST=~/.omp/agent/role-fleet.json
 {
   "models": [
     { "selector": "anthropic/claude-haiku-4-5", "aliases": ["haiku"] },
-    { "selector": "anthropic/claude-sonnet-4-6", "aliases": ["sonnet"] }
+    { "selector": "anthropic/claude-sonnet-4-6", "aliases": ["sonnet"] },
+    { "selector": "openai/gpt-5.5", "aliases": ["gpt"], "enabled": false }
   ],
   "roles": [
     { "role": "scout", "chain": ["haiku"] },
-    { "role": "implementer", "chain": ["sonnet"] }
+    { "role": "implementer", "chain": ["sonnet"], "aliases": ["builder"] }
   ]
 }
 ```
 
+| Field | Meaning |
+|---|---|
+| `models[].selector` | The concrete `provider/id` this entry stands for (required) |
+| `models[].aliases` | Extra names the model answers to — a chain may name an alias instead of the selector |
+| `models[].enabled` | `false` takes the model out of every chain (default `true`) |
+| `roles[].role` | The seat the entry pins: `scout`, `planner`, `implementer`, `tester`, `reviewer`, `docs-updater`, `designer`, `security`, `consul` |
+| `roles[].chain` | The models for that seat, in preference order — selectors or aliases |
+| `roles[].aliases` | Extra names for that same seat (e.g. `builder` for `implementer`) |
+
+A seat the file does not describe keeps its `@` alias, and the plan says so. Council members
+take the first, second, … model of their seat's chain, so a chain of three distinct models
+gives a council three different models.
+
 ### Confirm the cast
 
-Before anything is written you see the seats, models, and grants (read-only / edit / shell). Presets: run all, look-only, fewer reviewers, or pick seats. Dropping a seat drops its dependents. Headless hosts skip the dialog and dispatch.
+Before anything is written you see the seats, models, and grants (read-only / edit / shell). Presets: **Run all of them**, **Look, don't touch** (drops every seat that can change the code), **One reviewer instead of N** (a council only — it keeps exactly one reviewer), and **Choose each seat yourself**. Dropping a seat drops its dependents. Headless hosts skip the dialog and dispatch.
 
-When an **agent** drives the fleet (`role_fleet_plan` tool, or `/role-fleet --yes`), the recommended cast is accepted automatically so the turn does not hang on a menu. Pass `autoConfirm: false` on the tool to force the dialog.
+When an **agent** drives the fleet (`role_fleet_plan` tool, or `/role-fleet --yes`), the recommended cast is accepted automatically so the turn does not hang on a menu. The plan records that cast as *auto-accepted*, not as confirmed. Pass `autoConfirm: false` on the tool to force the dialog.
+
+### The `role_fleet_plan` tool
+
+The same planner the command uses, as a tool. It writes `.omp/agents/rf-*` and the run tree,
+so it is a write-tier tool, and a read-only seat may not call it.
+
+| Parameter | Type | Default | Effect |
+|---|---|---|---|
+| `task` | string | — | The task to decompose (required, not blank) |
+| `maxRoles` | number | 4 | Cap on generated roles (2–8) |
+| `allowlist` | string | — | Pin models to an allowlist JSON file |
+| `dryRun` | boolean | `false` | Plan without writing agent definitions |
+| `council` | number | 3 when the task asks for it | Reviewers on distinct model-role aliases (1–3) |
+| `models` | string[] | — | Explicit review models, in order (max 5) |
+| `consul` | string | session model | Model that reconciles the council's reports |
+| `reviewOnly` | boolean | `false` | Scout + review seats only — no seat can change the code |
+| `slices` | number | 1 | Fan the implementation out across N writer seats (1–4) |
+| `autoConfirm` | boolean | `true` | Accept the recommended cast without a dialog |
 
 ---
 
 ## Models
 
-By default seats use `@` aliases (`@smol`, `@plan`, `@task`, `@slow`, …) from your `/model` → `modelRoles`.
+By default seats use `@` aliases from your `/model` → `modelRoles`:
+
+| Seat | Alias |
+|---|---|
+| Investigator, Tester, Docs updater | `@smol` |
+| Planner | `@plan` |
+| Implementer, Migration runner | `@task` |
+| Reviewer, Security auditor | `@slow` |
+| Designer | `@designer` |
+| Proposed specialists | `@smol`, `@plan`, `@task`, `@slow`, `@designer`, `@vision` |
+
+`@designer` and `@vision` are **not** stock omp model roles: they resolve only if your
+`/model` → `modelRoles` has a `designer` / `vision` entry. Without one the seat runs on the
+parent session's model, and the plan says the alias was not resolved.
 
 Each seat records what **actually** ran (including retry fallbacks) from its own session when it yields; the main session shows a divergence as it happens:
 
@@ -114,6 +162,28 @@ role-fleet: rf-reviewer-c1 — planned `anthropic/claude-opus-4-6`, ran `zai/glm
 A fallback is the seat's **own** model changing: an advisor's model swap fires the same event in the same session and is not counted as the seat's.
 
 `/role-fleet report` and `.role-fleet/run-*/plan.json` keep the same record (model, fallback, verdict, seat time).
+
+A selector the host cannot resolve — a `--models` entry, a `--consul`, an allowlist pin —
+is marked unresolved in the plan, on the consent screen and in the seat's brief: the seat
+runs on the session model, not on the one that was named.
+
+---
+
+## Environment
+
+| Variable | Effect |
+|---|---|
+| `ROLE_FLEET_ALLOWLIST` | Path to the allowlist JSON. Used when `--allowlist` is not given; `~` is expanded |
+| `ROLE_FLEET_MCP_READONLY` | Comma-separated MCP tool-name prefixes a read-only seat may call (default: none) |
+
+Allowlist paths offered as completions for `--allowlist`, when the file exists — nothing is
+auto-loaded from them:
+
+```text
+.omp/role-fleet.json
+~/.omp/agent/role-fleet.json
+~/.orch/fleet.json
+```
 
 ---
 
