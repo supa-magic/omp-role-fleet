@@ -18,6 +18,7 @@ import {
   parseMcpAllowlist,
   MCP_ALLOWLIST_ENV,
 } from "../src/mcp-policy.ts";
+import { BUILD_TOOLS, READ_TOOLS, WRITE_TOOLS } from "../src/core.ts";
 
 const READ_ONLY_SEAT = ["read", "grep", "glob", "find", "ast_grep"];
 const WRITER_SEAT = ["read", "grep", "glob", "find", "ast_grep", "edit", "write", "bash"];
@@ -48,6 +49,15 @@ test("a seat is read-only when every tool it declares is read-tier", () => {
   // An empty grant is not "harmless" — the host reads it as "no built-ins".
   assert.equal(isReadOnlyToolset([]), false);
   assert.equal(isReadOnlyToolset(undefined), false);
+});
+
+test("the shipped grants sit on the right side of the read-only line", () => {
+  // The fixtures above are local copies; the guard has to agree with the grants
+  // the cast actually hands out, or a read seat loses its MCP guard (or a writer
+  // gets policed) the day either list grows.
+  assert.equal(isReadOnlyToolset(READ_TOOLS), true);
+  assert.equal(isReadOnlyToolset(WRITE_TOOLS), false);
+  assert.equal(isReadOnlyToolset(BUILD_TOOLS), false);
 });
 
 test("a read-only seat may not call an MCP tool the operator did not allow", () => {

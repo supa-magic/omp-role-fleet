@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SPECIALISTS, applySpecialists } from "../src/library.ts";
 import { parseProposal, proposeSpecialists, shouldPropose } from "../src/generate.ts";
-import { synthesizePlan } from "../src/synthesize.ts";
+import { mergeProposals, synthesizePlan } from "../src/synthesize.ts";
 import { isCouncilMember, planWaves, READ_TOOLS } from "../src/core.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { renderDispatch } from "../src/render.ts";
@@ -551,8 +551,8 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
       { id, title: "F", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] },
     ]);
 
-  // The council mints `reviewer-c1`… after the parser's reserved list is
-  // built, so the parser alone cannot see the collision. Merging it made
+  // The council mints `reviewer-c1`… at synthesis time; the parser reserves the
+  // pattern, so the proposal never reaches the merge. Merging it made
   // `validatePlan` refuse the whole plan and destroyed a healthy council run.
   for (const id of ["reviewer-c1", "reviewer-c3"]) {
     const result = await runRoleFleet({
@@ -563,10 +563,17 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
     });
     assert.equal(result.ok, true, `a colliding proposal must not take down the run (${id})`);
     assert.ok(
-      result.plan!.notes.some((n) => n.includes(id) && n.includes("already in use")),
-      `the collision must be reported: ${result.plan!.notes.join(" | ")}`,
+      result.plan!.notes.some((n) => n.includes("specialist proposal rejected")),
+      `the refusal must be reported: ${result.plan!.notes.join(" | ")}`,
     );
+    assert.equal(result.plan!.roles.filter((r) => r.id === id).length, 1, `${id} must stay the council's own seat`);
   }
+
+  // The merge keeps its own guard for an id the parser cannot know about.
+  const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir, council: 2 });
+  const [stray] = parseProposal(JSON.stringify([{ id: "stray-seat", title: "S", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] }]))!;
+  const kept = mergeProposals({ ...plan, roles: [...plan.roles, { ...stray, artifact: join(dir, "stray-seat.md") }] }, [stray], { artifactDir: dir, maxRoles: 8, analysisOnly: false });
+  assert.ok(kept.notes.some((n) => n.includes("stray-seat") && n.includes("already in use")), kept.notes.join(" | "));
 
   // A non-colliding proposal on the same run still merges.
   const merged = await runRoleFleet({
@@ -583,6 +590,34 @@ test("more than three proposed roles is refused outright", () => {
   const many = reply([one, { ...one, id: "b-two" }, { ...one, id: "c-three" }, { ...one, id: "d-four" }]);
   assert.equal(parseProposal(many), null);
   assert.equal(parseProposal(reply([one, { ...one, id: "b-two" }]))?.roles.length, 2);
+});
+
+test("a proposal claiming a minted id or a static artifact is refused whole", () => {
+  // The council mints `reviewer-c<N>`, a fan-out `implementer-<N>`, the consul
+  // is a catalog seat, and a proposal's artifact is `<id>.md` beside the static
+  // reports — so `review` would overwrite `review.md` and the last yield wins.
+  const role = (id: string) => ({ id, title: "T", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] });
+  const ok = role("schema-auditor");
+  for (const id of ["reviewer-c1", "implementer-2", "consul", "review", "plan", "docs", "review-c3", "implementation-1"]) {
+    assert.equal(parseProposal(JSON.stringify([ok, role(id)])), null, `accepted reserved id ${id}`);
+  }
+  assert.equal(parseProposal(JSON.stringify([ok]))?.[0]?.id, "schema-auditor");
+});
+
+test("every artifact a synthesized cast writes is refused as a proposal id", () => {
+  // The static tier spells its artifact names inline, so the sandbox keeps its
+  // own copy; this is the drift check between the two.
+  const plans = [
+    synthesizePlan({ task: "refactor the whole auth module across the codebase, run the tests and update the README docs", cwd: "/tmp", workDir: "/w" }),
+    synthesizePlan({ task: "fix the auth bug", cwd: "/tmp", workDir: "/w", council: 3, consul: "@slow" }),
+    synthesizePlan({ task: "fix the auth bug and run the tests", cwd: "/tmp", workDir: "/w", slices: 3 }),
+  ];
+  const stems = new Set(plans.flatMap((p) => p.roles.map((r) => r.artifact.replace(/^.*\//, "").replace(/\.md$/, ""))));
+  for (const expected of ["review-c1", "consul", "implementation-1", "scout"]) assert.ok(stems.has(expected), `fixture lost ${expected}`);
+  for (const stem of stems) {
+    const reply = JSON.stringify([{ id: stem, title: "T", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] }]);
+    assert.equal(parseProposal(reply), null, `proposal may claim static artifact ${stem}.md`);
+  }
 });
 
 test("shouldPropose triggers on explicit asks, degenerate casts, and thin analysis plans", () => {

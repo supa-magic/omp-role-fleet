@@ -1,7 +1,30 @@
 # Changelog
 
 Entries before 1.4.0 are reconstructed from the commit record and the tags that
-exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
+exist (`v1.3.4`, `v1.3.5`, `v1.5.1`–`v1.5.3`, `v1.6.0`, `v1.7.0`); a release is
+cut from `package.json#version`. 1.4.0 and 1.5.0 were never published or tagged:
+their changes first shipped in 1.5.1. The `0.0.0-stage` version on npm was a
+staging publish, not a release.
+
+## Unreleased
+
+### Fixed — the proposal sandbox guards the names the cast already owns
+
+- A proposal is refused whole when a role claims an id the static cast mints
+  (`consul`, `reviewer-c<N>`, `implementer-<N>`, any catalog seat) or an id
+  whose `<id>.md` would land on a static seat's report (`review`, `plan`,
+  `docs`, `scout`, `implementation`, `test-report`, `review-c<N>`,
+  `implementation-<N>`). Two seats writing one artifact meant the last yield
+  won.
+
+### Internal
+
+- Tests cover a declined or refused cast on `role_fleet_plan`, the host side
+  turn that proposes specialists (no tools, 800-token cap, sandboxed reply),
+  the read-only seat brief's MCP grant line, and the read-only line drawn
+  against the grants the plugin actually ships.
+- The changelog says which versions were published: 1.4.0 and 1.5.0 never
+  were, and `0.0.0-stage` was a staging publish.
 
 ## Unreleased
 
@@ -274,7 +297,7 @@ every connected MCP tool, and a write-capable one would have run unattended.
   npm login. CI also runs test + typecheck on `main` and pull requests.
 
 
-## 1.5.0
+## 1.5.0 — not published; shipped in 1.5.1
 
 Correctness and post-dispatch ownership.
 
@@ -347,7 +370,7 @@ Correctness and post-dispatch ownership.
   the orchestration graph for a path helper; the tool parameter type reuses
   `Flags`, and the write-only `emitted`/`dispatched` result fields are gone.
 
-## 1.4.0
+## 1.4.0 — not published; shipped in 1.5.1
 
 Cast decisions, the run tree's safety, the council's authority, and a shell where
 a seat has to run something.
