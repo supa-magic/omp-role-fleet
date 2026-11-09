@@ -12,17 +12,34 @@ import { BUILD_TOOLS, grantsWrite, READ_TOOLS, SEAT_CATALOG, VOCAB, WRITE_TOOLS 
 
 export interface Specialist {
   /** Matched against the task text; a specialist joins the plan when it hits.
-   *  Every pattern comes from `core.VOCAB`, so a seat's trigger and the cast's
-   *  own reading of the same words cannot drift apart. */
-  match: RegExp;
+   *  Every trigger reads `core.VOCAB`, so a seat's trigger and the cast's own
+   *  reading of the same words cannot drift apart. */
+  match: (task: string) => boolean;
   /** Replaces the implementer instead of adding a role (migration case). */
   replacesImplementer?: boolean;
   spec: Omit<RoleSpec, "dependsOn" | "artifact"> & { dependsOn?: string[] };
 }
 
+/**
+ * Is this task about an interface?
+ *
+ * `VOCAB.image` names a surface outright — a screenshot, a stylesheet, a
+ * landing page — and one of those is a UI ask on its own. The weaker words
+ * (image, render, layout, design, theme) name a surface only in company:
+ * "build the docker image in CI" is a pipeline, "render.ts" is a module, and a
+ * memory layout is not a page. So a weak word counts only when a surface word
+ * stands in the same task.
+ *
+ * One predicate for both readers — the cast's vision seat and the designer
+ * seat below — so the two cannot disagree about what a UI task is.
+ */
+export function isUiTask(task: string): boolean {
+  return VOCAB.image.test(task) || (VOCAB.uiHint.test(task) && VOCAB.uiSurface.test(task));
+}
+
 export const SPECIALISTS: Specialist[] = [
   {
-    match: VOCAB.image,
+    match: isUiTask,
     spec: {
       id: "designer",
       title: SEAT_CATALOG.catalog.designer.title,
@@ -44,7 +61,7 @@ export const SPECIALISTS: Specialist[] = [
     },
   },
   {
-    match: VOCAB.security,
+    match: (task) => VOCAB.security.test(task),
     spec: {
       id: "security-auditor",
       title: SEAT_CATALOG.catalog["security-auditor"].title,
@@ -64,7 +81,7 @@ export const SPECIALISTS: Specialist[] = [
     },
   },
   {
-    match: VOCAB.migration,
+    match: (task) => VOCAB.migration.test(task),
     replacesImplementer: true,
     spec: {
       id: "migration-runner",
@@ -108,7 +125,7 @@ export function applySpecialists(
 ): RoleSpec[] {
   let next = [...roles];
   for (const specialist of SPECIALISTS) {
-    if (!specialist.match.test(task)) continue;
+    if (!specialist.match(task)) continue;
 
     if (specialist.replacesImplementer) {
       const index = next.findIndex((r) => r.id === "implementer");
@@ -153,19 +170,42 @@ export function applySpecialists(
       continue;
     }
     const role = toRole(specialist, workDir, has);
-    next.push(role);
+    // A writer beside the implementer is a second writer in the same wave: two
+    // write grants, no partition of the files between them, and whichever runs
+    // second overwrites the first. The writer waits for the implementer
+    // instead, and the seats that judge or document the work wait for the
+    // writer: review must see every write, not just the implementer's share.
+    const implementer = grantsWrite(grants) && has(SEAT_CATALOG.base.code.id) ? SEAT_CATALOG.base.code.id : null;
+    const seated: RoleSpec = implementer
+      ? { ...role, dependsOn: [...(role.dependsOn ?? []), implementer] }
+      : role;
+    next.push(seated);
+    if (grantsWrite(grants)) {
+      next = next.map((r) => {
+        const judges =
+          r.id === SEAT_CATALOG.base.review.id ||
+          (r.id === SEAT_CATALOG.base.docs.id && grantsWrite(r.tools ?? []));
+        return judges && !(r.dependsOn ?? []).includes(seated.id)
+          ? { ...r, dependsOn: [...(r.dependsOn ?? []), seated.id] }
+          : r;
+      });
+      notes.push(
+        implementer
+          ? `specialist ${seated.id} added; it waits for the ${implementer}, and the reviewer and docs wait for it`
+          : `specialist ${seated.id} added`,
+      );
+      continue;
+    }
     // A read-only specialist produces findings, and the reviewer is the seat that
     // checks findings: it reads this report, so it waits on it. Without the edge
     // the reviewer runs beside the audit and reviews without it — a wave barrier
     // used to hide that by holding the reviewer anyway. A council inherits the
     // reviewer's dependencies, so its members wait on the audit too.
-    if (!grantsWrite(grants)) {
-      next = next.map((r) =>
-        r.id === "reviewer" && !(r.dependsOn ?? []).includes(role.id)
-          ? { ...r, dependsOn: [...(r.dependsOn ?? []), role.id] }
-          : r,
-      );
-    }
+    next = next.map((r) =>
+      r.id === SEAT_CATALOG.base.review.id && !(r.dependsOn ?? []).includes(role.id)
+        ? { ...r, dependsOn: [...(r.dependsOn ?? []), role.id] }
+        : r,
+    );
     notes.push(`specialist ${specialist.spec.id} added`);
   }
   return next;

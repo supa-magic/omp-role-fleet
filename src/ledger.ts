@@ -21,7 +21,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { baseModel, type RunOutcome } from "./core.ts";
 import { observeSeat, plannedModel, type ModelObservation } from "./model-observed.ts";
-import type { SeatRecord } from "./seats.ts";
+import { artifactInsideRun, type SeatRecord } from "./seats.ts";
 
 /** What one seat's session saw when the seat yielded. */
 export interface SeatYield {
@@ -110,12 +110,17 @@ export async function settleSeat(input: SeatYield): Promise<SettleResult> {
 
   let written: string | undefined;
   if (!aborted && !record.writesOwnReport && fields.report) {
-    try {
-      await mkdir(dirname(record.artifact), { recursive: true });
-      await writeFile(record.artifact, fields.report.endsWith("\n") ? fields.report : `${fields.report}\n`, "utf8");
-      written = record.artifact;
-    } catch {
-      // A path the run directory no longer owns is not worth failing the seat.
+    // The report goes where the run directory says, and nowhere else: a path
+    // outside it came from a manifest someone edited, and writing there would
+    // put a seat's report outside the tree that owns it.
+    if (await artifactInsideRun(dirname(record.manifestPath), record.artifact)) {
+      try {
+        await mkdir(dirname(record.artifact), { recursive: true });
+        await writeFile(record.artifact, fields.report.endsWith("\n") ? fields.report : `${fields.report}\n`, "utf8");
+        written = record.artifact;
+      } catch {
+        // A path the run directory no longer owns is not worth failing the seat.
+      }
     }
   }
 

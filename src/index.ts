@@ -569,7 +569,13 @@ export default function roleFleet(pi: ExtensionAPI): void {
         .max(MAX_ROLES)
         .optional()
         .describe(`Cap on generated roles (default ${DEFAULT_MAX_ROLES})`),
-      allowlist: z.string().optional().describe("Pin models to an allowlist JSON file"),
+      // A blank path is an absent one, not a request for no allowlist: the
+      // operator's ROLE_FLEET_ALLOWLIST still applies, and only that file pins
+      // the run. Naming a file here wins over the environment.
+      allowlist: z
+        .string()
+        .optional()
+        .describe("Pin models to an allowlist JSON file (blank: use ROLE_FLEET_ALLOWLIST)"),
       dryRun: z.boolean().optional().describe("Plan without writing agent definitions"),
       council: z
         .number()

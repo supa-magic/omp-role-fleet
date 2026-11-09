@@ -8,10 +8,10 @@
  * not emit (a restart, a revived subagent) is rebuilt from its agent file and
  * the run's `plan.json`, which hold the same facts durably.
  */
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AGENT_PREFIX } from "./core.ts";
-import { agentsDir, manifestPath } from "./run-layout.ts";
+import { agentsDir, manifestPath, runDir } from "./run-layout.ts";
 
 /** Marks a file as plugin-generated so stale runs can be pruned safely. */
 export const GENERATED_MARKER = "<!-- role-fleet:generated -->";
@@ -46,10 +46,53 @@ export interface EmittedSeat {
   modelResolved?: string;
 }
 
+/**
+ * The registry key: one working tree, one seat name.
+ *
+ * Agent names are reused across projects and across runs, so the name alone
+ * is not an identity — a process that serves two trees would hand the second
+ * project's record to the first project's seat.
+ */
+function seatKey(cwd: string, agent: string): string {
+  return `${cwd}\u0000${agent}`;
+}
+
 const seats = new Map<string, SeatRecord>();
 
 type Notify = (text: string, level: "info" | "warning") => void;
 let notifier: Notify | undefined;
+
+/**
+ * Is `artifact` inside the run directory `runDir`?
+ *
+ * A manifest is a file on disk that anyone can edit, so the path it names for
+ * a seat's report is untrusted input: a hand-edited `plan.json` could point a
+ * report at `/tmp/x` or at another repository. The plugin writes that report
+ * itself, so the path has to stay inside the run's own directory.
+ *
+ * Two spellings of one directory are one directory: a project reached through
+ * a symlink is still that project, so the real paths are compared when the
+ * plain comparison fails.
+ */
+export async function artifactInsideRun(runDir: string, artifact: string): Promise<boolean> {
+  const base = resolve(runDir);
+  const target = resolve(artifact);
+  if (within(base, target)) return true;
+  try {
+    const realBase = await realpath(base);
+    const realParent = await realpath(dirname(target));
+    return within(realBase, resolve(realParent, basename(target)));
+  } catch {
+    return false;
+  }
+}
+
+/** Is `target` strictly below `base`? */
+function within(base: string, target: string): boolean {
+  const rel = relative(base, target);
+  if (rel === "" || isAbsolute(rel)) return false;
+  return rel !== ".." && !rel.startsWith(`..${sep}`);
+}
 
 function recordOf(cwd: string, runId: string, a: EmittedSeat): SeatRecord {
   return {
@@ -65,12 +108,12 @@ function recordOf(cwd: string, runId: string, a: EmittedSeat): SeatRecord {
 }
 
 /**
- * Record the seats a run just emitted. Agent names are reused across runs, and
- * the emitter has just overwritten their files on disk, so the newest run wins
- * here exactly as it does there.
+ * Record the seats a run just emitted. Agent names are reused across runs and
+ * across projects, and the emitter has just overwritten their files on disk, so
+ * the newest run in this tree wins here exactly as it does there.
  */
 export function registerRun(cwd: string, runId: string, agents: readonly EmittedSeat[]): void {
-  for (const a of agents) seats.set(a.agent, recordOf(cwd, runId, a));
+  for (const a of agents) seats.set(seatKey(cwd, a.agent), recordOf(cwd, runId, a));
 }
 
 /** Drop every in-memory record (tests; the disk record stays authoritative). */
@@ -104,7 +147,7 @@ export function notify(text: string, level: "info" | "warning"): void {
  */
 export async function seatRecord(agent: string, cwd: string): Promise<SeatRecord | undefined> {
   if (!agent.startsWith(AGENT_PREFIX)) return undefined;
-  return seats.get(agent) ?? (await seatFromDisk(agent, cwd));
+  return seats.get(seatKey(cwd, agent)) ?? (await seatFromDisk(agent, cwd));
 }
 
 /** Parse a definition's `tools: [...]` line (always written as a JSON array). */
@@ -140,6 +183,11 @@ async function seatFromDisk(agent: string, cwd: string): Promise<SeatRecord | un
   }
   const tools = Array.isArray(entry?.tools) ? entry.tools : toolsFromDefinition(body);
   if (!entry || typeof entry.artifact !== "string" || typeof entry.model !== "string" || !tools) return undefined;
+  // The manifest is a file on disk: its artifact path is only as trustworthy
+  // as the file itself. A path outside the run directory is refused, and no
+  // record is built for it — the seat would otherwise write its report
+  // wherever a hand-edited plan.json points.
+  if (!(await artifactInsideRun(runDir(cwd, runId), entry.artifact))) return undefined;
   const record = recordOf(cwd, runId, {
     agent,
     artifact: entry.artifact,
@@ -148,6 +196,6 @@ async function seatFromDisk(agent: string, cwd: string): Promise<SeatRecord | un
     model: entry.model,
     ...(typeof entry.modelResolved === "string" ? { modelResolved: entry.modelResolved } : {}),
   });
-  seats.set(agent, record);
+  seats.set(seatKey(cwd, agent), record);
   return record;
 }

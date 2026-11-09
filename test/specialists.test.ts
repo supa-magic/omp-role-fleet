@@ -39,6 +39,74 @@ test("UI work earns a designer on @designer, in the seat a tester would hold", (
   assert.ok(plan.notes.some((n) => n.includes("designer takes the seat a tester would hold")));
 });
 
+test("a designer beside an implementer waits for it, and review waits for the designer", () => {
+  // Two write grants in one wave with no file partition between them: whichever
+  // seat ran second overwrote the first, and the reviewer — waiting on the
+  // implementer alone — judged the change before the designer's half existed.
+  const plan = synthesizePlan({ task: "fix the login page css bug", cwd: "/tmp", workDir: "/tmp/w", maxRoles: 4 });
+  const role = (id: string) => plan.roles.find((r) => r.id === id)!;
+  assert.ok(role("designer"), `designer missing; cast is ${ids(plan).join(",")}`);
+  assert.ok(role("designer").dependsOn.includes("implementer"), `designer deps: ${role("designer").dependsOn.join(",")}`);
+  assert.ok(role("reviewer").dependsOn.includes("designer"), `reviewer deps: ${role("reviewer").dependsOn.join(",")}`);
+  // No wave holds two writers.
+  for (const wave of planWaves(plan.roles)) {
+    const writers = wave.filter((r) => r.tools.includes("edit"));
+    assert.ok(writers.length <= 1, `concurrent writers: ${writers.map((r) => r.id).join(",")}`);
+  }
+  const order = planWaves(plan.roles).map((w) => w.map((r) => r.id).join("+"));
+  assert.deepEqual(order, ["scout", "implementer", "designer", "reviewer"]);
+});
+
+test("the council and a writing docs seat wait for the designer too", () => {
+  const council = synthesizePlan({
+    task: "fix the login page css bug",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+    council: 3,
+  });
+  const members = council.roles.filter((r) => isCouncilMember(r.id));
+  assert.equal(members.length, 3);
+  for (const m of members) assert.ok(m.dependsOn.includes("designer"), `${m.id} deps: ${m.dependsOn.join(",")}`);
+
+  const docs = synthesizePlan({
+    task: "fix the login page css bug and update the docs",
+    cwd: "/tmp",
+    workDir: "/tmp/w",
+    maxRoles: 6,
+  });
+  const updater = docs.roles.find((r) => r.id === "docs-updater");
+  assert.ok(updater, `docs seat missing; cast is ${ids(docs).join(",")}`);
+  assert.ok(updater!.dependsOn.includes("designer"), `docs deps: ${updater!.dependsOn.join(",")}`);
+});
+
+test("a pure UI cast has no implementer to wait for", () => {
+  // The designer *is* the implementation there: it waits on the scout alone.
+  const plan = basePlan("design a new onboarding flow");
+  assert.deepEqual(plan.roles.find((r) => r.id === "designer")!.dependsOn, ["scout"]);
+});
+
+test("image, render, layout, design and theme need a UI word beside them", () => {
+  for (const task of [
+    "build the docker image in CI",
+    "render the markdown on the server",
+    "fix the memory layout of the struct",
+    "design the retry policy for the queue worker",
+    "fix the theme loader crash in the config parser",
+  ]) {
+    assert.ok(!ids(basePlan(task)).includes("designer"), `${task}: ${ids(basePlan(task)).join(",")}`);
+  }
+  for (const task of [
+    "fix the image upload button on the profile page",
+    "render the chart component",
+    "fix the layout of the settings screen",
+    "theme the signup form",
+  ]) {
+    assert.ok(ids(basePlan(task)).includes("designer"), `${task}: ${ids(basePlan(task)).join(",")}`);
+  }
+  const docker = basePlan("build the docker image in CI");
+  assert.ok(ids(docker).includes("tester"), `the tester the UI rule spends must stay: ${ids(docker).join(",")}`);
+});
+
 test("a review-only ask mints no writer, even when the task names a UI", () => {
   // The exact shape that cost a write-capable seat on a code review: the task
   // text mentions "ui" (host UI, a file named render.ts, anything), and the

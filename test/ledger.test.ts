@@ -3,7 +3,7 @@
  * `yield` settling in that seat's own session.
  */
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -134,4 +134,54 @@ test("an agent the plugin did not generate has no seat record", async () => {
   await rm(join(dir, ".role-fleet"), { recursive: true });
   // The agent file survives but its run manifest is gone: nothing to settle against.
   assert.equal(await seatRecord("rf-scout", dir), undefined);
+});
+
+test("two projects in one process keep their own seat records", async () => {
+  // Seat names are reused across projects, so the name alone is not an
+  // identity: the second project's run must not hand its record to the
+  // first project's seat.
+  const a = await emittedRun("audit the deps");
+  const b = await emittedRun("audit the deps");
+  const scoutA = a.run.agents.find((x) => x.role === "scout")!;
+  const scoutB = b.run.agents.find((x) => x.role === "scout")!;
+  assert.equal(scoutA.agent, scoutB.agent, "both projects use the same seat name");
+
+  const recordA = await seatRecord(scoutA.agent, a.dir);
+  const recordB = await seatRecord(scoutB.agent, b.dir);
+  assert.equal(recordA?.artifact, scoutA.artifact, "project A's seat must point at project A's artifact");
+  assert.equal(recordB?.artifact, scoutB.artifact, "project B's seat must point at project B's artifact");
+  assert.notEqual(recordA?.manifestPath, recordB?.manifestPath, "the two projects must not share a manifest");
+});
+
+test("a manifest whose artifact leaves the run directory builds no seat record", async () => {
+  const { dir, run } = await emittedRun("audit the deps");
+  const scout = run.agents.find((a) => a.role === "scout")!;
+  const manifestPath = join(dir, ".role-fleet", run.plan!.runId!, "plan.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    agents: Array<{ agent: string; artifact: string }>;
+  };
+  manifest.agents = manifest.agents.map((a) => (a.agent === scout.agent ? { ...a, artifact: "/tmp/x" } : a));
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  forgetSeats();
+
+  // The path is on disk and points anywhere the manifest says: the plugin
+  // writes that report itself, so it writes nothing outside its own run.
+  assert.equal(await seatRecord(scout.agent, dir), undefined);
+});
+
+test("a run over a manifest with unsettled seats says so", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-unsettled-"));
+  const first = await runRoleFleet({ task: "audit the deps", cwd: dir });
+  assert.equal(first.ok, true);
+  // The first run's seats never settled: its manifest records intent only.
+  const manifest = JSON.parse(
+    await readFile(join(dir, ".role-fleet", first.plan!.runId!, "plan.json"), "utf8"),
+  ) as { agents: unknown[]; outcomes: unknown[] };
+  assert.equal(manifest.outcomes.length, 0);
+
+  const second = await runRoleFleet({ task: "audit the deps again", cwd: dir });
+  assert.ok(
+    second.plan!.notes.some((n) => n.includes(first.plan!.runId!) && /without an outcome/.test(n)),
+    `the unsettled run must be named: ${second.plan!.notes.join(" | ")}`,
+  );
 });

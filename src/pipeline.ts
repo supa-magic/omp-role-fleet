@@ -186,13 +186,26 @@ function stopped(verdict: GateVerdict, extra: Partial<RunResult> = {}): RunResul
  * the seat never runs on.
  */
 async function normalizeRequest(opts: RunOptions): Promise<Request> {
+  const notes: string[] = [];
   // Expanded here, where the path is opened: the tool and the env var never go
   // through the flag parser. Relative paths resolve against the session cwd.
-  const raw = expandHome(opts.allowlist ?? process.env.ROLE_FLEET_ALLOWLIST);
+  //
+  // A blank parameter is an absent one. The tool hands over a raw string, and
+  // an empty or whitespace-only value is not nullish, so `??` kept it and it
+  // won over `ROLE_FLEET_ALLOWLIST`: the operator's pinned run went out on
+  // aliases with nothing said. The environment still applies.
+  const asked = opts.allowlist?.trim();
+  if (opts.allowlist !== undefined && !asked) {
+    notes.push(
+      process.env.ROLE_FLEET_ALLOWLIST
+        ? "allowlist: a blank path was ignored — ROLE_FLEET_ALLOWLIST applies"
+        : "allowlist: a blank path was ignored — no allowlist file is in effect",
+    );
+  }
+  const raw = expandHome(asked ? asked : process.env.ROLE_FLEET_ALLOWLIST);
   const allowlist = raw && !isAbsolute(raw) ? join(opts.cwd, raw) : raw;
   const fleet = allowlist ? await loadAllowlist(allowlist) : undefined;
 
-  const notes: string[] = [];
   const named = opts.models?.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim()) ?? [];
   const seenBase: Record<string, string> = {};
   const models: string[] = [];

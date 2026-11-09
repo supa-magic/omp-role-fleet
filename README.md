@@ -54,7 +54,7 @@ Watch agents live with **Alt+A** (Agent Hub).
 | `--review-only` | Scout + review only — no code changes |
 | `--max-roles N` | Cap generated roles (default 4, max 8) |
 | `--slices N` | N parallel writer seats (max 4) |
-| `--allowlist FILE` | Pin models via JSON instead of `@` aliases |
+| `--allowlist FILE` | Pin models via JSON instead of `@` aliases (a blank path is ignored — `ROLE_FLEET_ALLOWLIST` applies) |
 
 Examples:
 
@@ -85,6 +85,8 @@ export ROLE_FLEET_ALLOWLIST=~/.omp/agent/role-fleet.json
   ]
 }
 ```
+
+A role's `chain` spreads across a review council — member N takes the Nth enabled model. Seats that share one core (a `--slices` fan-out) all take the chain's first enabled model.
 
 ### Confirm the cast
 

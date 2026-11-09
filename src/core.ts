@@ -269,9 +269,25 @@ export const VOCAB = {
    */
   multiFile:
     /\b(migrat\w*|across|several files|many files|multiple files|multi-file|whole repo|entire repo|repo-wide|codebase-wide|all files|every file|suite|codemod\w*)\b/i,
-  /** UI and visual work: a vision seat, and the designer seat. */
+  /**
+   * UI and visual work named outright: a screenshot, a mockup, a stylesheet, a
+   * landing page. One of these is a UI ask on its own.
+   */
   image:
-    /\b(screenshot\w*|image\w*|ui|ux|design\w*|visual\w*|layout\w*|render\w*|mockup\w*|wireframe\w*|frontend page|web page|landing page|css|stylesheet\w*|theme|dark mode)\b/i,
+    /\b(screenshot\w*|ui|ux|visual\w*|mockup\w*|wireframe\w*|frontend page|web page|landing page|css|stylesheet\w*|dark mode)\b/i,
+  /**
+   * Words that mean UI only in company: "build the docker image in CI" is a
+   * pipeline, "render.ts" is a module, and a memory layout is not a page. Each
+   * of these names a surface only when a surface word stands beside it.
+   */
+  uiHint: /\b(image\w*|render\w*|layout\w*|design\w*|theme)\b/i,
+  /**
+   * The surfaces that put the hint words to work: a page, a screen, a
+   * component, a stylesheet, a flow. A hint word beside one of these is UI
+   * work; on its own it is not.
+   */
+  uiSurface:
+    /\b(ui|ux|page|pages|screens?|components?|css|stylesheet\w*|styles?|frontend|front-end|buttons?|forms?|templates?|widgets?|navbar|browser|viewport|dashboard|flow|html|dom|icons?|mockups?|wireframes?|screenshots?|landing page|web page)\b/i,
   /** An ask for documentation output. Code comments are code-adjacent, not a
    *  docs ask: "add a comment explaining the loop" must mint the implementer,
    *  not a docs-updater that leaves the loop alone. */
@@ -631,11 +647,19 @@ function roleIndex(fleet: Fleet): Map<string, FleetRole> {
  * A role whose seat is absent from the file keeps its alias and a note — the
  * file constrains, it does not have to describe the whole world.
  *
- * Several roles can share one seat (a review council is three seats called
- * `reviewer`), so binding is ordinal per seat: member N takes the Nth usable
- * model of that seat's chain. Binding them all to the first entry would turn
- * "review with different providers" into three copies of one model at triple
- * the cost — the shared blind spot the council exists to avoid.
+ * A council is several seats called `reviewer`, and its members exist to answer
+ * on different models, so binding is ordinal for them: member N takes the Nth
+ * usable model of that seat's chain. Binding them all to the first entry would
+ * turn "review with different providers" into three copies of one model at
+ * triple the cost — the shared blind spot the council exists to avoid.
+ *
+ * Every other seat that several roles share is one job split across seats, not
+ * several opinions on it: a `--slices 2` fan-out is two writers of one
+ * implementation, and a proposed specialist beside the implementer is the same
+ * kind of work. Those seats take the chain's first enabled model. Spreading
+ * them would spend a second model on the same work, and with a chain of one
+ * the second seat would fall off the end and keep its alias — a seat the file
+ * describes, running on a model the file never named.
  */
 export function bindFleet(fleet: Fleet, roles: RoleSpec[], notes: string[]): RoleSpec[] {
   const ridx = roleIndex(fleet);
@@ -648,12 +672,6 @@ export function bindFleet(fleet: Fleet, roles: RoleSpec[], notes: string[]): Rol
       notes.push(`role ${r.id}: seat "${r.core}" not in allowlist — keeping ${r.model}`);
       return r;
     }
-    // The ordinal must be keyed by the *normalized* seat, exactly like the
-    // lookup above: "Reviewer" and "reviewer" resolve to one seat, so they must
-    // also share one counter — otherwise both take chain[0] and the multi-model
-    // spread this whole mechanism exists for collapses.
-    const n = ordinal.get(seatKey) ?? 0;
-    ordinal.set(seatKey, n + 1);
     const chain = (seat.chain ?? [])
       .map((token) => midx.get(normalizeSeat(token)))
       .filter((m): m is FleetModel => !!m && m.enabled !== false);
@@ -661,6 +679,15 @@ export function bindFleet(fleet: Fleet, roles: RoleSpec[], notes: string[]): Rol
       notes.push(`role ${r.id}: seat "${r.core}" has no enabled model in its chain — keeping ${r.model}`);
       return r;
     }
+    // Only a council spreads the chain. Every other seat that several roles
+    // share takes the first enabled model of its chain.
+    const member = isCouncilMember(r.id);
+    // The ordinal must be keyed by the *normalized* seat, exactly like the
+    // lookup above: "Reviewer" and "reviewer" resolve to one seat, so they must
+    // also share one counter — otherwise both take chain[0] and the multi-model
+    // spread this whole mechanism exists for collapses.
+    const n = member ? (ordinal.get(seatKey) ?? 0) : 0;
+    if (member) ordinal.set(seatKey, n + 1);
     if (n >= chain.length) {
       // The file describes fewer distinct models than this seat has members.
       // Reusing one would quietly undo the spread the seat exists for, so the
