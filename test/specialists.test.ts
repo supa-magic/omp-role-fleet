@@ -571,7 +571,7 @@ test("a proposal claiming an id the plan already uses is discarded, not merged",
 
   // The merge keeps its own guard for an id the parser cannot know about.
   const plan = synthesizePlan({ task: "fix the bug", cwd: dir, workDir: dir, council: 2 });
-  const [stray] = parseProposal(JSON.stringify([{ id: "stray-seat", title: "S", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] }]))!;
+  const stray = parseProposal(reply([{ id: "stray-seat", title: "S", mission: "Hijack the seat", acceptance: ["a"], tools: ["read"], effort: "low", model: "@slow", dependsOn: [] }]))!.roles[0]!;
   const kept = mergeProposals({ ...plan, roles: [...plan.roles, { ...stray, artifact: join(dir, "stray-seat.md") }] }, [stray], { artifactDir: dir, maxRoles: 8, analysisOnly: false });
   assert.ok(kept.notes.some((n) => n.includes("stray-seat") && n.includes("already in use")), kept.notes.join(" | "));
 
@@ -599,9 +599,9 @@ test("a proposal claiming a minted id or a static artifact is refused whole", ()
   const role = (id: string) => ({ id, title: "T", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] });
   const ok = role("schema-auditor");
   for (const id of ["reviewer-c1", "implementer-2", "consul", "review", "plan", "docs", "review-c3", "implementation-1"]) {
-    assert.equal(parseProposal(JSON.stringify([ok, role(id)])), null, `accepted reserved id ${id}`);
+    assert.equal(parseProposal(reply([ok, role(id)])), null, `accepted reserved id ${id}`);
   }
-  assert.equal(parseProposal(JSON.stringify([ok]))?.[0]?.id, "schema-auditor");
+  assert.equal(parseProposal(reply([ok]))?.roles[0]?.id, "schema-auditor");
 });
 
 test("every artifact a synthesized cast writes is refused as a proposal id", () => {
@@ -615,8 +615,8 @@ test("every artifact a synthesized cast writes is refused as a proposal id", () 
   const stems = new Set(plans.flatMap((p) => p.roles.map((r) => r.artifact.replace(/^.*\//, "").replace(/\.md$/, ""))));
   for (const expected of ["review-c1", "consul", "implementation-1", "scout"]) assert.ok(stems.has(expected), `fixture lost ${expected}`);
   for (const stem of stems) {
-    const reply = JSON.stringify([{ id: stem, title: "T", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] }]);
-    assert.equal(parseProposal(reply), null, `proposal may claim static artifact ${stem}.md`);
+    const body = reply([{ id: stem, title: "T", mission: "Do it", acceptance: ["x"], tools: ["read"], effort: "low", model: "@smol", dependsOn: [] }]);
+    assert.equal(parseProposal(body), null, `proposal may claim static artifact ${stem}.md`);
   }
 });
 

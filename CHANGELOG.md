@@ -6,7 +6,7 @@ cut from `package.json#version`. 1.4.0 and 1.5.0 were never published or tagged:
 their changes first shipped in 1.5.1. The `0.0.0-stage` version on npm was a
 staging publish, not a release.
 
-## Unreleased
+## 1.8.0
 
 ### Fixed — the proposal sandbox guards the names the cast already owns
 
@@ -25,8 +25,6 @@ staging publish, not a release.
   against the grants the plugin actually ships.
 - The changelog says which versions were published: 1.4.0 and 1.5.0 never
   were, and `0.0.0-stage` was a staging publish.
-
-## Unreleased
 
 ### Fixed — UI casts, run isolation, allowlist pinning
 

@@ -951,7 +951,7 @@ test("a host side turn proposes specialists through the sandbox, with no tools a
     return execute("id", { task: "ask a threat modelling expert to review the auth flow" }, null, null, ctx);
   };
 
-  const proposal = JSON.stringify([
+  const proposal = JSON.stringify({ intent: "analysis", roles: [
     {
       id: "threat-modeler",
       title: "Threat modeler",
@@ -962,14 +962,14 @@ test("a host side turn proposes specialists through the sandbox, with no tools a
       model: "@slow",
       dependsOn: [],
     },
-  ]);
+  ] });
   const accepted = await run(proposal);
   assert.equal(turns.length, 1, "the proposer must reach the host's side turn exactly once");
   const [turn] = turns;
   assert.equal(turn!.tools, false, "the side turn must run with tools disabled");
   assert.equal(turn!.maxTokens, 800);
   assert.equal(turn!.minimizeEffort, true);
-  assert.match(String(turn!.promptText), /Reply with ONLY a JSON array/);
+  assert.match(String(turn!.promptText), /Reply with ONLY a JSON object/);
   assert.match(String(turn!.promptText), /Task: ask a threat modelling expert/);
   const modeler = accepted.details?.roles?.find((r) => r.id === "threat-modeler");
   assert.ok(modeler, `the sandbox-accepted proposal must join the cast: ${JSON.stringify(accepted.details?.roles)}`);
