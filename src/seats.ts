@@ -26,8 +26,6 @@ export interface SeatRecord {
   manifestPath: string;
   /** Where the seat's full report belongs. */
   artifact: string;
-  /** False: the seat cannot write, so the plugin places its report. */
-  writesOwnReport: boolean;
   /** The built-in grant the seat's definition pins. */
   tools: string[];
   /** The selector pinned in the agent file: an alias or a concrete id. */
@@ -40,7 +38,6 @@ export interface SeatRecord {
 export interface EmittedSeat {
   agent: string;
   artifact: string;
-  writesOwnReport: boolean;
   tools: string[];
   model: string;
   modelResolved?: string;
@@ -57,7 +54,6 @@ function recordOf(cwd: string, runId: string, a: EmittedSeat): SeatRecord {
     runId,
     manifestPath: manifestPath(cwd, runId),
     artifact: a.artifact,
-    writesOwnReport: a.writesOwnReport,
     tools: [...a.tools],
     pinned: a.model,
     ...(a.modelResolved ? { resolved: a.modelResolved } : {}),
@@ -119,6 +115,23 @@ function toolsFromDefinition(body: string): string[] | undefined {
   }
 }
 
+/**
+ * The grant a seat's own definition file declares.
+ *
+ * The run record is the authority on what a seat may do, but it is not always
+ * there: a run directory that was removed, or a definition left behind by a run
+ * this process did not emit, still says what the seat may do. This is the
+ * fallback the MCP guard reads when the record cannot be resolved — a seat
+ * whose grant cannot be read at all is guarded, not trusted.
+ */
+export async function seatToolsFromDefinition(agent: string, cwd: string): Promise<string[] | undefined> {
+  try {
+    return toolsFromDefinition(await readFile(join(agentsDir(cwd), `${agent}.md`), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
 async function seatFromDisk(agent: string, cwd: string): Promise<SeatRecord | undefined> {
   let body: string;
   try {
@@ -143,7 +156,6 @@ async function seatFromDisk(agent: string, cwd: string): Promise<SeatRecord | un
   const record = recordOf(cwd, runId, {
     agent,
     artifact: entry.artifact,
-    writesOwnReport: entry.writesOwnReport === true,
     tools,
     model: entry.model,
     ...(typeof entry.modelResolved === "string" ? { modelResolved: entry.modelResolved } : {}),

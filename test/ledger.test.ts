@@ -3,14 +3,14 @@
  * `yield` settling in that seat's own session.
  */
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { settleSeat } from "../src/ledger.ts";
 import { runRoleFleet } from "../src/pipeline.ts";
 import { renderRunList, renderRunReport, renderRunStatus } from "../src/report.ts";
-import { forgetSeats, seatRecord } from "../src/seats.ts";
+import { clearNotifier, forgetSeats, seatRecord, setNotifier } from "../src/seats.ts";
 
 const yielded = (report: string, verdict = "pass") => ({ data: { summary: "headline", report, verdict }, status: "success" });
 
@@ -77,18 +77,105 @@ test("an aborted yield places nothing and is recorded as a failure", async () =>
   assert.match(await renderRunStatus(dir), new RegExp(`Failed: ${scout.agent}`));
 });
 
-test("a writer seat writes its own report; the ledger does not overwrite it", async () => {
+test("a writer seat's report is placed by the plugin as well", async () => {
+  // A writer's own write to the run directory is refused by the host sandbox,
+  // so the seat that could write its artifact never did — the plugin places
+  // every seat's report, whoever yielded it.
   const { dir, run } = await emittedRun("fix the login bug");
   const implementer = run.agents.find((a) => a.role === "implementer")!;
-  assert.equal(implementer.writesOwnReport, true);
+  assert.equal(implementer.mayWrite, true);
   const settled = await settleSeat({ record: (await seatRecord(implementer.agent, dir))!, details: yielded("IMPL") });
+  assert.equal(settled.written, implementer.artifact);
+  assert.equal((await readFile(implementer.artifact, "utf8")).trim(), "IMPL");
+});
+
+test("a seat that yields no report is recorded as a failure, not as a placed report", async () => {
+  const { dir, run, outcomes } = await emittedRun("audit the deps");
+  const scout = run.agents.find((a) => a.role === "scout")!;
+  const notices: Array<{ text: string; level: string }> = [];
+  const sink = (text: string, level: "info" | "warning") => notices.push({ text, level });
+  setNotifier(sink);
+  try {
+    // No report at all, and a report that is only whitespace: both are the
+    // same absence, and both must be visible.
+    for (const details of [
+      { data: { summary: "s", verdict: "pass" }, status: "success" },
+      { data: { summary: "s", report: "   ", verdict: "pass" }, status: "success" },
+    ]) {
+      const settled = await settleSeat({ record: (await seatRecord(scout.agent, dir))!, details });
+      assert.equal(settled.written, undefined);
+      assert.equal(settled.outcome?.error, "seat yielded no report");
+      assert.equal(settled.outcome?.artifact, undefined);
+    }
+  } finally {
+    clearNotifier(sink);
+  }
+  await assert.rejects(access(scout.artifact), "nothing may be placed where the report should be");
+  const recorded = await outcomes();
+  assert.equal(recorded.length, 2);
+  assert.ok(recorded.every((o) => o.error === "seat yielded no report"));
+  assert.match(await renderRunStatus(dir), new RegExp(`Failed: ${scout.agent}`));
+  assert.ok(
+    notices.some((n) => n.level === "warning" && /yielded no report/.test(n.text)),
+    `the main session must be warned: ${JSON.stringify(notices)}`,
+  );
+});
+
+test("a report that cannot be written is recorded as an error, not as a placed report", async () => {
+  const { dir, run, outcomes } = await emittedRun("audit the deps");
+  const scout = run.agents.find((a) => a.role === "scout")!;
+  // The artifact path is a directory: the write cannot succeed.
+  await mkdir(scout.artifact, { recursive: true });
+  const settled = await settleSeat({ record: (await seatRecord(scout.agent, dir))!, details: yielded("REPORT") });
   assert.equal(settled.written, undefined);
-  await assert.rejects(access(implementer.artifact));
+  assert.ok(settled.outcome?.error, "the failed write must be recorded");
+  assert.equal(settled.outcome?.artifact, undefined);
+  const [outcome] = await outcomes();
+  assert.ok(outcome!.error);
+});
+
+test("a report yielded in sections is placed when the terminal yield arrives", async () => {
+  const { dir, run } = await emittedRun("audit the deps");
+  const scout = run.agents.find((a) => a.role === "scout")!;
+  const record = (await seatRecord(scout.agent, dir))!;
+  // The section is not the seat's result: it records nothing on its own.
+  const section = await settleSeat({ record, details: { data: "PARTIAL", status: "success", type: ["report"] } });
+  assert.equal(section.outcome, undefined);
+  // The terminal yield carries no data at all: the report is the section the
+  // seat folded on the way.
+  const settled = await settleSeat({
+    record,
+    details: { data: undefined, status: "success", type: "result" },
+    sections: { report: "FULL REPORT", verdict: "pass" },
+  });
+  assert.equal(settled.written, scout.artifact);
+  assert.equal((await readFile(scout.artifact, "utf8")).trim(), "FULL REPORT");
+  assert.equal(settled.outcome?.verdict, "pass");
+});
+
+test("an outcome that cannot be recorded is reported, not dropped in silence", async () => {
+  const { dir, run } = await emittedRun("audit the deps");
+  const scout = run.agents.find((a) => a.role === "scout")!;
+  // The manifest is unreadable: the outcome cannot be appended to it.
+  await writeFile(join(dir, ".role-fleet", run.plan!.runId!, "plan.json"), "{ truncated", "utf8");
+  const notices: string[] = [];
+  const sink = (text: string) => notices.push(text);
+  setNotifier(sink);
+  try {
+    const settled = await settleSeat({ record: (await seatRecord(scout.agent, dir))!, details: yielded("REPORT") });
+    assert.equal(settled.recorded, false);
+  } finally {
+    clearNotifier(sink);
+  }
+  assert.ok(
+    notices.some((n) => /could not be recorded/.test(n)),
+    `a lost outcome must be reported: ${JSON.stringify(notices)}`,
+  );
 });
 
 test("seats of one wave settling together keep every outcome", async () => {
   const { dir, run, outcomes } = await emittedRun("refactor the adapter and review it --council");
-  const readOnly = run.agents.filter((a) => !a.writesOwnReport);
+  const readOnly = run.agents.filter((a) => !a.mayWrite);
   assert.ok(readOnly.length >= 2);
   await Promise.all(
     readOnly.map(async (a) => settleSeat({ record: (await seatRecord(a.agent, dir))!, details: yielded(`REPORT ${a.agent}`) })),

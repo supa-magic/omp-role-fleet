@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -201,7 +201,8 @@ function seatSession(name: string, cwd: string) {
     host.handlers.get(event)?.(payload, ctx(model)) as unknown;
   return {
     host,
-    start: async () => void (await call("agent_start", { type: "agent_start" })),
+    start: async (model?: { provider: string; id: string }) =>
+      void (await call("agent_start", { type: "agent_start" }, model)),
     toolCall: async (toolName: string) =>
       (await call("tool_call", { type: "tool_call", toolCallId: "call-1", toolName, input: {} })) as
         | { block?: boolean; reason?: string }
@@ -236,7 +237,7 @@ test("a seat's yield in its own session places its report and announces a fallba
   const reviewer = (await manifest()).agents.find((a) => a.agent === "rf-reviewer")!;
 
   const seat = seatSession("rf-reviewer", dir);
-  await seat.start();
+  await seat.start({ provider: "mock", id: "role-slow" });
   await seat.fallback("mock/role-slow", "xai/grok-4");
   notices.length = 0;
   await seat.yielded({ data: { summary: "s", report: "FULL REVIEW", verdict: "fail" }, status: "success" }, { provider: "xai", id: "grok-4" });
@@ -255,6 +256,71 @@ test("a seat's yield in its own session places its report and announces a fallba
   const other = seatSession("explore", dir);
   await other.yielded({ data: { report: "X" }, status: "success" });
   assert.equal((await manifest()).outcomes.length, 1);
+});
+
+test("a report yielded in sections is placed when the terminal yield arrives", async () => {
+  // The host assembles the sections after the last one, and the terminal yield
+  // can arrive with no data at all: the plugin has to keep the sections itself,
+  // or the report is lost with them.
+  const dir = await mkdtemp(join(tmpdir(), "rf-sections-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("fix the auth bug", commandCtx(dir).ctx);
+  const runId = (await readdir(join(dir, ".role-fleet")))[0]!;
+  const manifest = async () =>
+    JSON.parse(await readFile(join(dir, ".role-fleet", runId, "plan.json"), "utf8")) as {
+      agents: Array<{ agent: string; artifact: string }>;
+      outcomes: Array<{ agent: string; artifact?: string; verdict?: string }>;
+    };
+  const scout = (await manifest()).agents.find((a) => a.agent === "rf-scout")!;
+
+  const seat = seatSession("rf-scout", dir);
+  await seat.start();
+  await seat.yielded({ data: "THE FULL REPORT", status: "success", type: ["report"] });
+  assert.equal((await manifest()).outcomes.length, 0, "a section is not the seat's result");
+  await seat.yielded({ data: undefined, status: "success", type: "result" });
+
+  assert.equal((await readFile(scout.artifact, "utf8")).trim(), "THE FULL REPORT");
+  const outcomes = (await manifest()).outcomes;
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0]!.artifact, scout.artifact);
+});
+
+test("a fallback is the seat's own model changing, not the advisor's", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rf-fallback-"));
+  const host = stubHost();
+  roleFleet(host.pi as never);
+  const handler = host.commands.get("role-fleet")!.handler as (args: string, ctx: unknown) => Promise<void>;
+  await handler("fix the auth bug", commandCtx(dir).ctx);
+  const runId = (await readdir(join(dir, ".role-fleet")))[0]!;
+  const outcomes = async () => {
+    const parsed = JSON.parse(await readFile(join(dir, ".role-fleet", runId, "plan.json"), "utf8")) as {
+      outcomes: Array<{ agent: string; fallback: boolean; route?: string }>;
+    };
+    return parsed.outcomes;
+  };
+
+  // The host retries the seat on another model: the seat starts again, and the
+  // fallback it reported must survive the second start.
+  const seat = seatSession("rf-scout", dir);
+  await seat.start({ provider: "mock", id: "role-slow" });
+  await seat.fallback("mock/role-slow", "xai/grok-4");
+  await seat.start({ provider: "xai", id: "grok-4" });
+  await seat.yielded({ data: { summary: "s", report: "R", verdict: "pass" }, status: "success" }, { provider: "xai", id: "grok-4" });
+  const [outcome] = await outcomes();
+  assert.equal(outcome!.fallback, true, "the seat's own model changed");
+  assert.match(String(outcome!.route), /mock\/role-slow/);
+
+  // An advisor's fallback fires the same event in the same session and leaves
+  // the seat's model alone: it is not the seat's fallback.
+  const advisor = seatSession("rf-reviewer", dir);
+  await advisor.start({ provider: "mock", id: "role-slow" });
+  await advisor.fallback("mock/role-slow", "xai/grok-4");
+  await advisor.yielded({ data: { summary: "s", report: "R2", verdict: "pass" }, status: "success" }, { provider: "mock", id: "role-slow" });
+  const second = (await outcomes())[1]!;
+  assert.equal(second.fallback, false, "an advisor's fallback is not the seat's");
+  assert.equal(second.route, undefined);
 });
 
 test("a read-only seat may not call an MCP tool the operator did not allow", async () => {
@@ -297,6 +363,48 @@ test("a read-only seat may not call an MCP tool the operator did not allow", asy
   }
 });
 
+test("a generated seat whose grant cannot be read is guarded, not trusted", async () => {
+  // The run record is gone and the definition file says nothing, so nothing
+  // proves the seat may not write. Failing open there is how a "read-only"
+  // seat ends up holding every connected MCP tool.
+  const dir = await mkdtemp(join(tmpdir(), "rf-mcp-failclosed-"));
+  const before = process.env.ROLE_FLEET_MCP_READONLY;
+  delete process.env.ROLE_FLEET_MCP_READONLY;
+  try {
+    const ghost = seatSession("rf-ghost", dir);
+    await ghost.start();
+    const refused = await ghost.toolCall("mcp__linear_create_issue");
+    assert.equal(refused?.block, true, `an unreadable grant must not open every MCP tool: ${JSON.stringify(refused)}`);
+    assert.match(refused?.reason ?? "", /rf-ghost/);
+    assert.match(refused?.reason ?? "", /ROLE_FLEET_MCP_READONLY/);
+
+    // The operator's allowlist is still the way through.
+    process.env.ROLE_FLEET_MCP_READONLY = "mcp__codesearch_";
+    assert.equal(await ghost.toolCall("mcp__codesearch_search"), undefined, "an allowed MCP tool must pass");
+    assert.equal((await ghost.toolCall("mcp__linear_create_issue"))?.block, true, "other servers stay refused");
+  } finally {
+    if (before === undefined) delete process.env.ROLE_FLEET_MCP_READONLY;
+    else process.env.ROLE_FLEET_MCP_READONLY = before;
+  }
+});
+
+test("a generated seat whose own definition grants a write keeps its MCP tools", async () => {
+  // The run record is gone, but the seat's definition file still says what it
+  // may do: a seat that may change the tree keeps its MCP tools.
+  const dir = await mkdtemp(join(tmpdir(), "rf-mcp-definition-"));
+  const agents = join(dir, ".omp", "agents");
+  await mkdir(agents, { recursive: true });
+  await writeFile(
+    join(agents, "rf-writer.md"),
+    '---\nname: rf-writer\ndescription: "a writer"\ntools: ["read", "edit", "bash"]\nmodel: "@task"\n---\n',
+    "utf8",
+  );
+  const writer = seatSession("rf-writer", dir);
+  await writer.start();
+  assert.ok(!writer.host.events.includes("tool_call"), "a writer must not be guarded");
+  assert.equal(await writer.toolCall("mcp__linear_create_issue"), undefined);
+});
+
 test("a running seat keeps its own run when a newer run reuses its name", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rf-pinned-"));
   const host = stubHost();
@@ -320,9 +428,10 @@ test("a running seat keeps its own run when a newer run reuses its name", async 
   assert.equal((await readFile(join(dir, ".role-fleet", first!, "scout.md"), "utf8")).trim(), "RUN A REPORT");
 });
 
-test("a read-only seat cannot plan a fleet; a writer seat can", async () => {
+test("no generated seat may plan a fleet", async () => {
   // The plan tool writes and prunes agent definitions, and extension tools
-  // reach every seat whatever its grant.
+  // reach every seat whatever its grant. A nested plan would rewrite the
+  // definitions of the seats in its own run that have not started yet.
   const dir = await mkdtemp(join(tmpdir(), "rf-nested-"));
   const host = stubHost();
   roleFleet(host.pi as never);
@@ -337,8 +446,9 @@ test("a read-only seat cannot plan a fleet; a writer seat can", async () => {
   };
   const refused = await call("rf-scout");
   assert.equal(refused.isError, true);
-  assert.match(refused.content[0]!.text, /not available to the read-only seat `rf-scout`/);
-  assert.notEqual((await call("rf-implementer")).isError, true);
+  assert.match(refused.content[0]!.text, /not available to the seat `rf-scout`/);
+  // A writer seat may not plan one either.
+  assert.equal((await call("rf-implementer")).isError, true);
 });
 
 test("the --review-only flag reaches the pipeline, not just the parser", async () => {

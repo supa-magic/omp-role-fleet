@@ -592,6 +592,21 @@ test("a hand-copied rename of a generated agent survives the next run", async ()
   assert.ok(!files.includes("rf-implementer.md"), "the stale generated file itself must still go");
 });
 
+test("a copy of a generated seat under another name survives the next run", async () => {
+  // The copy carries the generated marker and its own frontmatter name, but the
+  // name is not the plugin's: a file outside the `rf-` namespace is the user's,
+  // marker or not. The prune used to delete it on the next run.
+  const dir = await mkdtemp(join(tmpdir(), "rf-prune-prefix-"));
+  await emitAgents(planFor("fix the auth bug"), dir);
+  const body = await readFile(join(dir, "rf-scout.md"), "utf8");
+  await writeFile(join(dir, "my-reviewer.md"), body.replace(/^name: rf-scout$/m, "name: my-reviewer"), "utf8");
+
+  await emitAgents(planFor("update the readme and changelog"), dir);
+
+  const files = await readdir(dir);
+  assert.ok(files.includes("my-reviewer.md"), "a marker file outside the rf- prefix must survive the prune");
+});
+
 test("a hand-written seat file is kept, and the run's own seat takes the next free name", async () => {
   // Without the generated marker nothing proves this plugin wrote the file, so
   // overwriting it would lose user content — and the next run would then *delete*
@@ -724,7 +739,7 @@ test("roster ids stay unique and within budget even when truncation collides", a
     effort: "med" as const,
     artifact: "",
     dependsOn: [],
-    writesOwnReport: false,
+    mayWrite: false,
     tools: ["read"],
   });
   const groups: DispatchGroup[] = [
@@ -851,8 +866,12 @@ test("a read-only role is told to yield its report, not to write a file", () => 
   // any other agent's message.
   assert.match(scoutBody, /scout\.md/, "the read-only role must still name its artifact path");
 
-  // A writer still gets its artifact path — that is how the run collects it.
-  assert.match(agentMarkdown(plan, impl), /Write your report to `.*implementation\.md`/);
+  // A writer is not told to write the file either: the host sandbox refuses a
+  // seat's write to the run directory, so a brief that orders it produces a
+  // seat with no report at all. The plugin places it.
+  const implBody = agentMarkdown(plan, impl);
+  assert.ok(!implBody.includes("- Write your report to"), "a writer must not be told to write the file");
+  assert.match(implBody, /the plugin writes it to `.*implementation\.md`/);
 });
 
 test("every seat ships a report schema, so a bare summary cannot pass as a report", () => {
@@ -909,7 +928,7 @@ test("a seat states the model it was pinned to and the one it resolved to", () =
   assert.match(resolved, /Model: `@smol` → resolved to `minimax\/MiniMax-M3`/);
 });
 
-test("an upstream read-only dependency names its path and who writes it", () => {
+test("an upstream dependency names its path and who puts the report there", () => {
   const plan = planFor("fix the auth bug");
   const scoutArtifact = plan.roles.find((r) => r.id === "scout")!.artifact;
 
@@ -921,18 +940,14 @@ test("an upstream read-only dependency names its path and who writes it", () => 
   assert.match(
     body,
     new RegExp(`\`scout\` → ${scoutArtifact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
-    "a read-only dependency must still name its artifact path",
+    "a dependency must still name its artifact path",
   );
-  assert.match(body, /the plugin writes its report here/, "and must say who puts it there");
+  assert.match(body, /placed by the plugin/, "and must say who puts it there");
 
-  // A writable dependency needs no such explanation. The tester waits on the
-  // implementer, which writes its own artifact — while the implementer's own
-  // brief still carries the note, because it waits on the read-only planner.
+  // A writable dependency reads the same way: the plugin places every seat's
+  // report, whatever the seat's own grant.
   const testerBrief = agentMarkdown(plan, plan.roles.find((r) => r.id === "tester")!);
-  assert.ok(
-    !testerBrief.includes("the plugin writes its report here"),
-    "a writable upstream role writes its own report",
-  );
+  assert.match(testerBrief, /placed by the plugin/);
 });
 
 test("the run artifact tree is bounded, keeping the newest runs", async () => {
@@ -1276,20 +1291,20 @@ test("a consul run's reviewer, brief and dispatch all agree the seat is read-onl
   // what it is, in the description the user's picker shows.
   assert.match(memberBody, /Read-only\./, "the description states the grant it actually has");
 
-  // The consul reads the members' artifacts, and each one is flagged as placed by
-  // the orchestrator rather than written by its reviewer.
+  // The consul reads the members' artifacts, and each one is flagged as placed
+  // by the plugin rather than written by its reviewer.
   const consulBody = agentMarkdown(plan, consul);
   for (const m of plan.roles.filter((r) => isCouncilMember(r.id))) {
     assert.ok(consulBody.includes(m.artifact), `the consul must be routed to ${m.artifact}`);
   }
-  assert.match(consulBody, /read-only role — the plugin writes its report here/);
+  assert.match(consulBody, /placed by the plugin/);
 
   // And the dispatch names every member's artifact as a file the main model has
   // to write before the consul's wave starts.
   const dir = await mkdtemp(join(tmpdir(), "rf-consul-brief-"));
   const agents = (await emitAgents(plan, dir)).agents;
   const dispatch = renderDispatch(dispatchGroups(agents), dir);
-  const readOnly = agents.filter((a) => !a.writesOwnReport);
+  const readOnly = agents.filter((a) => !a.mayWrite);
   for (const a of agents.filter((x) => isCouncilMember(x.role) || x.role === "consul")) {
     assert.ok(readOnly.includes(a), `${a.role} is read-only, so the orchestrator places its report`);
   }
@@ -1571,12 +1586,12 @@ test("the run directory exists as soon as agents are emitted", async () => {
   }
 });
 
-test("the dispatch tells the orchestrator where to place read-only reports", async () => {
-  // B: a read-only seat is told its report "belongs at <artifact>, and the
-  // orchestrator writes it there", and every downstream brief points at that same
-  // path — but nothing ever said this to the orchestrator. The instruction lived
-  // in a brief the main model never reads, so the dependency edge the pipeline
-  // itself created resolved to a file that only appeared if the parent guessed.
+test("the dispatch tells the orchestrator where every report lands", async () => {
+  // B: a seat is told its report "belongs at <artifact>", and every downstream
+  // brief points at that same path — but nothing ever said this to the
+  // orchestrator. The instruction lived in a brief the main model never reads,
+  // so the dependency edge the pipeline itself created resolved to a file that
+  // only appeared if the parent guessed.
   // Observed directly: a run directory with five agent files and no report in it.
   const dir = await mkdtemp(join(tmpdir(), "rf-channel-"));
   const result = await runRoleFleet({
@@ -1587,20 +1602,14 @@ test("the dispatch tells the orchestrator where to place read-only reports", asy
   assert.equal(result.ok, true);
 
   const dispatch = renderDispatch(result.groups, result.agentDir!);
-  assert.match(dispatch, /Read-only seats cannot write their artifact/, "the channel must be stated");
-  // Every read-only seat's declared path is named, so there is nothing to infer.
-  const readOnly = result.agents.filter((a) => !a.writesOwnReport);
-  assert.ok(readOnly.length, "a review plan must contain a read-only seat");
-  for (const seat of readOnly) {
+  assert.match(dispatch, /Every seat's full `report` is written by the plugin/, "the channel must be stated");
+  // Every seat's declared path is named, so there is nothing to infer: the
+  // plugin places them all, writer seats included.
+  for (const seat of result.agents) {
     assert.ok(
       dispatch.includes(seat.artifact),
       `${seat.role}'s artifact path is missing from the dispatch:\n${dispatch.slice(0, 500)}`,
     );
-  }
-  // And a seat that does hold write is not in the list — it writes its own file.
-  for (const writer of result.agents.filter((a) => a.writesOwnReport)) {
-    const line = dispatch.split("\n").find((l) => l.includes(writer.artifact));
-    assert.ok(!line || !/read-only/i.test(line), `${writer.role} listed as read-only while it holds write`);
   }
 });
 
@@ -1720,7 +1729,7 @@ test("a fan-out is emitted as ordinary agents in one wave, and recorded", async 
   assert.ok(files.includes("rf-implementer-1.md") && files.includes("rf-implementer-2.md"), files.join(", "));
   const seats = result.agents.filter((a) => a.role.startsWith("implementer-"));
   assert.equal(new Set(seats.map((a) => a.wave)).size, 1, "the fan-out is one parallel wave");
-  assert.ok(seats.every((a) => a.writesOwnReport), "each slice seat places its own report");
+  assert.ok(seats.every((a) => a.mayWrite), "each slice seat may change files");
   const manifest = JSON.parse(
     await readFile(join(dir, ".role-fleet", result.plan!.runId ?? "", "plan.json"), "utf8"),
   ) as { agents: Array<{ role: string }> };

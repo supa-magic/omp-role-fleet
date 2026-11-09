@@ -126,7 +126,8 @@ export interface DispatchItem {
   dependsOn: string[];
   /** Roster names this seat waits on: it starts once every one has delivered. */
   after: string[];
-  writesOwnReport: boolean;
+  /** Whether the seat's grant lets it change files. */
+  mayWrite: boolean;
 }
 
 export interface DispatchPlanGroup {
@@ -162,7 +163,7 @@ export function dispatchPlan(groups: DispatchGroup[]): DispatchPlanGroup[] {
       artifact: a.artifact,
       dependsOn: [...a.dependsOn],
       after: a.dependsOn.map((d) => nameOfRole.get(d)).filter((n): n is string => n !== undefined),
-      writesOwnReport: a.writesOwnReport,
+      mayWrite: a.mayWrite,
     })),
   }));
 }
@@ -255,20 +256,19 @@ export function renderDispatch(groups: DispatchGroup[], agentDir: string): strin
   }
   lines.push(`Agent definitions: \`${agentDir}\`.`, "");
   lines.push(...renderModelTable(everyAgent, nameOf));
-  // The plugin places a read-only seat's report from the seat's own session
-  // when it yields, so the main model never re-types a full report between
-  // waves — that was one output-bound turn per read-only seat on the critical
-  // path. The fallback stays named, because a seat that failed to yield the
-  // schema leaves no file and its downstream seats are told to read one.
-  const readOnly = everyAgent.filter((a) => !a.writesOwnReport);
-  if (readOnly.length) {
+  // The plugin places every seat's full report from the seat's own session when
+  // it yields, so the main model never re-types a full report between waves —
+  // that was one output-bound turn per seat on the critical path. The fallback
+  // stays named, because a seat that failed to yield the schema leaves no file
+  // and its downstream seats are told to read one.
+  if (everyAgent.length) {
     lines.push(
-      "Read-only seats cannot write their artifact path; the plugin writes each one's full",
-      "`report` there when the seat yields. Do not copy reports yourself. Only if a path below",
-      "is still missing after its seat settled, write that seat's FULL `report` there",
-      "before dispatching the seats that wait on it:",
+      "Every seat's full `report` is written by the plugin at its artifact path when the seat",
+      "yields. Do not copy reports yourself. Only if a path below is still missing after its",
+      "seat settled, write that seat's FULL `report` there before dispatching the seats that",
+      "wait on it:",
       "",
-      ...readOnly.map((a) => `- \`${nameOf.get(a.agent)}\` → ${a.artifact}`),
+      ...everyAgent.map((a) => `- \`${nameOf.get(a.agent)}\` → ${a.artifact}`),
       "",
     );
   }

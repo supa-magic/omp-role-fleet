@@ -12,7 +12,9 @@
  *
  * This module is the plugin-side half of that gap: a read-only seat may call
  * only the MCP tools the operator allowed by name. Everything else is refused
- * before it runs, with a reason the model can act on.
+ * before it runs, with a reason the model can act on. A seat whose grant
+ * cannot be read at all is refused too — a grant that cannot be shown to be
+ * harmless is not a licence to hold every connected MCP tool.
  */
 import { AGENT_PREFIX } from "./core.ts";
 
@@ -92,6 +94,17 @@ export function isReadOnlyToolset(tools: readonly string[] | undefined): boolean
   return !!tools?.length && tools.every((tool) => READ_ONLY_TOOL_NAMES.has(tool));
 }
 
+/**
+ * Whether a seat's grant lets it change the tree.
+ *
+ * The guard's question is narrower than the host's "is this seat read-only":
+ * it is "may this seat write?". A seat that cannot — or whose grant could not
+ * be read at all — is exactly the seat the guard exists for.
+ */
+export function seatMayWrite(tools: readonly string[] | undefined): boolean {
+  return !!tools?.length && !isReadOnlyToolset(tools);
+}
+
 /** The decision the guard reaches for one tool call. */
 export interface McpGuardVerdict {
   block: boolean;
@@ -114,33 +127,52 @@ export interface McpGuardInput {
 }
 
 /**
+ * The refusal a seat sees, and how to lift it.
+ *
+ * The operator allows a tool by name, so the reason says exactly how the name
+ * is spelled: the prefix is copied out of the seat's tool list, where the
+ * server name is sanitized.
+ */
+function refusal(input: McpGuardInput, why: string): McpGuardVerdict {
+  const allow = input.allowlist.length ? input.allowlist.join(", ") : "(none configured)";
+  return {
+    block: true,
+    reason:
+      `role-fleet: \`${input.toolName}\` is not available to the seat \`${input.agentName}\`. ` +
+      `${why} MCP tools are write-tier to the host and seats run unattended, so a seat that may not ` +
+      `write may only use the MCP tools the operator allowed (${allow}). Allow it with ` +
+      `${MCP_ALLOWLIST_ENV}=<tool-prefix>[,<tool-prefix>…] — the prefix is the tool name as it ` +
+      `appears in the seat's tool list (server names are lowercased and every character outside ` +
+      `a-z0-9_ becomes _), e.g. \`${MCP_ALLOWLIST_ENV}=mcp__codesearch_\` for the codesearch ` +
+      `server, or the exact tool name \`${input.toolName}\`. A seat that may write is not affected.`,
+  };
+}
+
+/**
  * Whether one tool call may proceed.
  *
- * Only MCP calls in read-only seats are ever refused. A writer seat keeps its
- * MCP tools (it may change the tree anyway), the main session keeps its own
- * (the host's consent screen governs those), and a seat whose toolset cannot
- * be read is left alone — a guard that guesses is worse than no guard.
+ * Only MCP calls in generated seats are ever refused. A writer seat keeps its
+ * MCP tools (it may change the tree anyway) and the main session keeps its own
+ * (the host's consent screen governs those).
+ *
+ * A seat whose grant cannot be read is refused rather than trusted: the run
+ * record is gone and its definition file says nothing, so nothing proves the
+ * seat may not write. Failing open there is how a "read-only" seat ends up
+ * holding every connected MCP tool — the exact gap this guard closes.
  */
 export function mcpGuardVerdict(input: McpGuardInput): McpGuardVerdict {
   if (!isMcpToolName(input.toolName)) return { block: false };
   if (input.agentKind !== "sub") return { block: false };
   // Hand-written agents are never this plugin's to police.
   if (!input.agentName.startsWith(AGENT_PREFIX)) return { block: false };
-  if (!input.seatTools) return { block: false };
-  if (!isReadOnlyToolset(input.seatTools)) return { block: false };
+  // The operator allowed this tool by name: it passes for every seat.
   if (isAllowedMcpTool(input.toolName, input.allowlist)) return { block: false };
-  const allow = input.allowlist.length
-    ? input.allowlist.join(", ")
-    : "(none configured)";
-  return {
-    block: true,
-    reason:
-      `role-fleet: \`${input.toolName}\` is not available to the read-only seat \`${input.agentName}\`. ` +
-      `MCP tools are write-tier to the host and seats run unattended, so a read-only seat may only ` +
-      `use the MCP tools the operator allowed (${allow}). Allow it with ` +
-      `${MCP_ALLOWLIST_ENV}=<tool-prefix>[,<tool-prefix>…] — the prefix is the tool name as it ` +
-      `appears in the seat's tool list (server names are lowercased and every character outside ` +
-      `a-z0-9_ becomes _), e.g. \`${MCP_ALLOWLIST_ENV}=mcp__codesearch_\` for the codesearch ` +
-      `server, or the exact tool name \`${input.toolName}\`. A seat that may write is not affected.`,
-  };
+  if (!input.seatTools?.length) {
+    return refusal(
+      input,
+      "Its tool grant could not be read, so it cannot be shown to be harmless.",
+    );
+  }
+  if (seatMayWrite(input.seatTools)) return { block: false };
+  return refusal(input, "It is read-only.");
 }

@@ -6,19 +6,25 @@
  * truncated manifest is skipped rather than breaking the list, and a missing
  * field is printed as unknown instead of invented.
  */
+import type { Dirent } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import type { RunManifest } from "./agents.ts";
 import type { RunOutcome } from "./core.ts";
 import { manifestPath, RUN_ID, runIdAt, runsRoot } from "./run-layout.ts";
 
 async function runDirs(cwd: string): Promise<string[]> {
-  let entries: string[];
+  let entries: Dirent[];
   try {
-    entries = await readdir(runsRoot(cwd));
+    entries = await readdir(runsRoot(cwd), { withFileTypes: true });
   } catch {
     return [];
   }
-  return entries.filter((name) => RUN_ID.test(name)).sort((a, b) => runIdAt(b) - runIdAt(a));
+  // Directories only: a file named `run-123` is not a run, and reading it as
+  // one is how a stray file turns into an unreadable manifest.
+  return entries
+    .filter((entry) => entry.isDirectory() && RUN_ID.test(entry.name))
+    .map((entry) => entry.name)
+    .sort((a, b) => runIdAt(b) - runIdAt(a));
 }
 
 async function loadManifest(cwd: string, runId: string): Promise<RunManifest> {
@@ -33,8 +39,21 @@ async function loadManifest(cwd: string, runId: string): Promise<RunManifest> {
     throw new Error(`${path} is not a run manifest`);
   }
   // Written by writeRunManifest and read back here; the shape is this plugin's
-  // own, and the renderer narrows every field it prints.
-  return parsed as RunManifest;
+  // own, and the renderer narrows every field it prints. A manifest that was
+  // edited by hand, or written by another tool, may be missing fields the
+  // renderer walks — the defaults keep the report readable instead of throwing
+  // on `undefined.map`.
+  const manifest = parsed as Partial<RunManifest>;
+  return {
+    ...(typeof manifest.runId === "string" ? { runId: manifest.runId } : {}),
+    task: typeof manifest.task === "string" ? manifest.task : "",
+    startedAt: typeof manifest.startedAt === "number" ? manifest.startedAt : 0,
+    notes: Array.isArray(manifest.notes) ? manifest.notes : [],
+    agents: Array.isArray(manifest.agents) ? manifest.agents : [],
+    ...(Array.isArray(manifest.outcomes) ? { outcomes: manifest.outcomes } : {}),
+    ...(typeof manifest.updatedAt === "number" ? { updatedAt: manifest.updatedAt } : {}),
+    ...(typeof manifest.pluginVersion === "string" ? { pluginVersion: manifest.pluginVersion } : {}),
+  };
 }
 
 function modelLine(outcome: RunOutcome): string {
@@ -109,14 +128,37 @@ export async function renderRunList(cwd: string): Promise<string> {
 export async function renderRunStatus(cwd: string): Promise<string> {
   const runs = await runDirs(cwd);
   if (!runs.length) return "No role-fleet runs in this repository yet.";
-  const runId = runs[0]!;
-  const manifest = await loadManifest(cwd, runId);
+  // The newest run's manifest may be unreadable — a truncated file, a directory
+  // that is not a run at all. The status of the next readable run is still
+  // worth showing, so the broken one is named and skipped rather than fatal.
+  const skipped: string[] = [];
+  let runId = "";
+  let manifest: RunManifest | undefined;
+  for (const candidate of runs) {
+    try {
+      manifest = await loadManifest(cwd, candidate);
+      runId = candidate;
+      break;
+    } catch {
+      skipped.push(candidate);
+    }
+  }
+  if (!manifest) {
+    return [
+      "No readable role-fleet manifest in this repository yet.",
+      ...skipped.map((id) => `  ${id}  (unreadable manifest)`),
+    ].join("\n");
+  }
   const outcomes = Array.isArray(manifest.outcomes) ? manifest.outcomes : [];
   const settled = new Set(outcomes.map((o) => o.agent));
-  const failed = outcomes.filter((o) => o.aborted || o.error || o.verdict === "fail");
+  // A seat that could not finish is a failed seat, whether it said so or not:
+  // `blocked` is the verdict of a seat that stopped short, and it belongs with
+  // the failures, not with the seats that are merely quiet.
+  const failed = outcomes.filter((o) => o.aborted || o.error || o.verdict === "fail" || o.verdict === "blocked");
   const fallbacks = outcomes.filter((o) => o.fallback);
   const missing = manifest.agents.filter((a) => !settled.has(a.agent)).map((a) => a.agent);
   const lines = [
+    ...(skipped.length ? [...skipped.map((id) => `${id}  (unreadable manifest)`), ""] : []),
     `Run ${runId}: ${settled.size}/${manifest.agents.length} settled`,
     `Task: ${manifest.task}`,
   ];

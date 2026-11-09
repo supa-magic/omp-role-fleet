@@ -104,13 +104,17 @@ Each seat records what **actually** ran (including retry fallbacks) from its own
 role-fleet: rf-reviewer-c1 — planned `anthropic/claude-opus-4-6`, ran `zai/glm-5`, FALLBACK
 ```
 
+A fallback is the seat's **own** model changing: an advisor's model swap fires the same event in the same session and is not counted as the seat's.
+
 `/role-fleet report` and `.role-fleet/run-*/plan.json` keep the same record (model, fallback, verdict, seat time).
 
 ---
 
 ## Reports
 
-Every seat yields a structured result (`structured: true` is set in each generated definition, so this holds even with the host's `task.structured` off): full **`report`**, short **`summary`**, **`verdict`**. The council and consul must read `report`, not `summary`. Read-only seats cannot write files — the plugin writes each one's full report to its artifact path when the seat yields, so the main model does not copy reports between waves.
+Every seat yields a structured result (`structured: true` is set in each generated definition, so this holds even with the host's `task.structured` off): full **`report`**, short **`summary`**, **`verdict`**. The council and consul must read `report`, not `summary`.
+
+The plugin writes every seat's full report to its artifact path when the seat yields — read-only and writer seats alike (a seat's own write to the run directory is refused by the host sandbox, so a writer seat could not do it itself). The main model never copies reports between waves. A seat that yields **no** report is recorded as a failure (`seat yielded no report`), its artifact is not written, and the main session is warned.
 
 ## Speed
 
@@ -147,7 +151,8 @@ Artifacts and `plan.json` live under `.role-fleet/` (gitignored; newest 10 kept)
 
 - Confirmation before write/dispatch (interactive hosts).
 - Tool grants are pinned per seat; shell only on implementer/tester-class seats.
-- Generated agents are `rf-*` only; hand-written agents are never touched.
+- Generated agents are `rf-*` only; hand-written agents are never touched, and
+  only `rf-*` files are ever pruned or replaced.
 - Task text never enters frontmatter.
 - **Read-only seats get no MCP tools by default.** omp gives every seat every
   connected MCP tool (a `tools:` list covers built-ins only), mints MCP tools
@@ -164,8 +169,11 @@ Artifacts and `plan.json` live under `.role-fleet/` (gitignored; newest 10 kept)
   named `my-server` is `mcp__my_server_`. The exact tool name also works
   (`mcp__codesearch_search`).
 
-  Seats that may write (implementer, tester) keep their MCP tools. Check the
-  effective list with `/role-fleet doctor`.
+  Seats that may write (implementer, tester) keep their MCP tools. A generated
+  seat whose grant cannot be read at all — no run record, no definition file —
+  is guarded too: it may call no MCP tool outside the allowlist, because
+  nothing proves it may not write. Check the effective list with
+  `/role-fleet doctor`.
 
 ---
 

@@ -4,6 +4,64 @@ Entries before 1.4.0 are reconstructed from the commit record and the tags that
 exist (`v1.3.4`, `v1.3.5`); a release is cut from `package.json#version`.
 
 
+## Unreleased
+
+### Fixed — a seat's report can no longer go missing
+
+- The plugin places **every** seat's full report at its artifact path when the
+  seat yields, writer seats included. A writer's own write to the run
+  directory is refused by the host sandbox, so the seat that could write its
+  artifact never did: the run looked healthy and the artifact was not there.
+- A seat that yields no report — or a blank one — is recorded as
+  `seat yielded no report`, no artifact is claimed, and the main session is
+  warned. The same goes for a report that could not be written.
+- A report yielded in sections is placed when the terminal yield arrives: the
+  host assembles the sections after the last one, and the terminal yield can
+  carry no data at all.
+- An outcome that could not be appended to `plan.json` is reported, not
+  dropped in silence.
+
+### Fixed — the MCP guard and the plan tool fail closed
+
+- A generated seat whose grant cannot be read — no run record, no definition
+  file — is guarded too: it may call no MCP tool outside the allowlist,
+  because nothing proves it may not write. The grant is read from the seat's
+  own definition file when the run record is gone.
+- `role_fleet_plan` is refused in **any** `rf-*` session, writer seats
+  included: a nested plan rewrites the definitions of seats that have not
+  started yet.
+
+### Fixed — the fallback record
+
+- A fallback is counted when the seat's **own** model changes. An advisor's
+  model swap fires the same event in the same session and was recorded as the
+  seat's own fallback.
+- A retry that starts the seat again no longer restarts its clock or erases
+  its fallback history: the seat's elapsed time and its fallback survive the
+  continuation.
+
+### Fixed — reading a run back
+
+- A manifest without `agents` or `notes` is read instead of thrown at, a file
+  named like a run is not a run, and `/role-fleet status` names an unreadable
+  newest manifest and shows the next readable run.
+- A seat that came back `blocked` counts as failed.
+- The first manifest of a run is written through a temp file and a rename.
+
+### Fixed — the prune spares the user's files
+
+- Only `rf-*` files are pruned or replaced. A copy of a generated seat under
+  another name carried the generated marker and was deleted by the next run.
+
+### Internal
+
+- `mayWrite` replaces `writesOwnReport` in the run manifest and in the plan
+  tool's dispatch data: the plugin places every seat's report, so the flag
+  says what the seat's grant allows.
+- A proposal whose dependencies form a cycle — or a role that waits on itself
+  — is refused whole, instead of shipping a plan that can never be scheduled.
+
+
 ## 1.7.0
 
 ### Fixed — the ledger works on default host settings

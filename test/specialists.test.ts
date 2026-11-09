@@ -312,6 +312,51 @@ test("an invented model, tool, or dependency invalidates the whole proposal", ()
   for (const v of variants) assert.equal(parseProposal(v), null, `accepted: ${v.slice(0, 40)}`);
 });
 
+test("a proposal whose dependencies form a cycle is refused whole", () => {
+  // A cycle among the proposed roles is a plan that can never be scheduled:
+  // the seats would wait on each other, and the conflict wave would ship
+  // briefs pointing at artifacts nobody ever writes.
+  const role = (id: string, dependsOn: string[]) =>
+    JSON.stringify([
+      {
+        id,
+        title: id,
+        mission: "Do the thing carefully",
+        acceptance: ["a"],
+        tools: ["read"],
+        effort: "low",
+        model: "@slow",
+        dependsOn,
+      },
+    ]);
+  const pair = JSON.stringify([
+    {
+      id: "x-alpha",
+      title: "A",
+      mission: "Do the thing carefully",
+      acceptance: ["a"],
+      tools: ["read"],
+      effort: "low",
+      model: "@slow",
+      dependsOn: ["x-beta"],
+    },
+    {
+      id: "x-beta",
+      title: "B",
+      mission: "Do the other thing carefully",
+      acceptance: ["a"],
+      tools: ["read"],
+      effort: "low",
+      model: "@slow",
+      dependsOn: ["x-alpha"],
+    },
+  ]);
+  assert.equal(parseProposal(pair), null, "a dependency cycle must be refused");
+  assert.equal(parseProposal(role("x-self", ["x-self"])), null, "a self-dependency must be refused");
+  // A dependency on a static-cast seat is a leaf, not a cycle.
+  assert.equal(parseProposal(role("x-leaf", ["scout"]))?.length, 1);
+});
+
 test("a grant that mixes a real tool with a rogue one is refused whole", () => {
   // Filtering the rogue tool out would make the element a valid role that holds
   // a tool it may not have, so the sandbox refuses the element instead, like a
